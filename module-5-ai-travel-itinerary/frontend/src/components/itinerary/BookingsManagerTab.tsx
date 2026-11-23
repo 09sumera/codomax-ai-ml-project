@@ -7,6 +7,7 @@ import {
   Plane,
   Hotel,
   Navigation,
+  Car,
   Activity,
   CheckCircle,
   Tag,
@@ -123,9 +124,11 @@ export const BookingsManagerTab: React.FC<BookingsManagerTabProps> = ({ trip }) 
         return <Plane className="w-4 h-4 text-sky-400" />;
       case 'hotel':
         return <Hotel className="w-4 h-4 text-purple-400" />;
+      case 'car_rental':
+      case 'rental_car':
+        return <Car className="w-4 h-4 text-emerald-400" />;
       case 'train':
       case 'bus':
-      case 'car_rental':
         return <Navigation className="w-4 h-4 text-emerald-400" />;
       default:
         return <Activity className="w-4 h-4 text-amber-400" />;
@@ -135,7 +138,12 @@ export const BookingsManagerTab: React.FC<BookingsManagerTabProps> = ({ trip }) 
   const filteredBookings =
     filterType === 'all'
       ? bookings
-      : bookings.filter((b) => b.booking_type === filterType);
+      : bookings.filter((b) => {
+          if (filterType === 'rental_car') {
+            return b.booking_type === 'rental_car' || b.booking_type === 'car_rental';
+          }
+          return b.booking_type === filterType;
+        });
 
   const currencySymbol = trip.currency === 'USD' ? '$' : '₹';
 
@@ -164,7 +172,7 @@ export const BookingsManagerTab: React.FC<BookingsManagerTabProps> = ({ trip }) 
 
       {/* Filter Tabs */}
       <div className="flex flex-wrap gap-2 text-xs">
-        {['all', 'flight', 'hotel', 'train', 'activity', 'other'].map((type) => (
+        {['all', 'flight', 'hotel', 'rental_car', 'train', 'activity', 'other'].map((type) => (
           <button
             key={type}
             onClick={() => setFilterType(type)}
@@ -174,7 +182,7 @@ export const BookingsManagerTab: React.FC<BookingsManagerTabProps> = ({ trip }) 
                 : 'bg-surface border-border text-muted hover:border-primary/40'
             }`}
           >
-            {type}
+            {type === 'rental_car' ? 'Vehicles' : type}
           </button>
         ))}
       </div>

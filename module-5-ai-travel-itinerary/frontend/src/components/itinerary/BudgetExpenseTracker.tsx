@@ -6,12 +6,19 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
-  RotateCcw,
   Tag,
   PieChart,
+  Scale,
+  Users,
+  ArrowRight,
+  Check,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
-import { Trip, Expense, BudgetAnalytics } from '../../types/trip';
+import { Trip, Expense, BudgetAnalytics, SettlementData, SimplifiedDebt } from '../../types/trip';
 import { tripService } from '../../services/tripService';
+import { offlineStorage } from '../../services/offlineStorage';
+import { useAuth } from '../../context/AuthContext';
 
 interface BudgetExpenseTrackerProps {
   trip: Trip;
@@ -28,12 +35,30 @@ const CATEGORIES = [
 ] as const;
 
 export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip }) => {
+  const { user } = useAuth();
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [analytics, setAnalytics] = useState<BudgetAnalytics | null>(null);
+  const [settlement, setSettlement] = useState<SettlementData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [settling, setSettling] = useState(false);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+
+  // Group split form state
+  const currentUserName = user?.name || 'You';
+  const tripMembers = Array.from(
+    new Set([
+      currentUserName,
+      ...(trip.collaborators || []).map((c) => c.name || c.email.split('@')[0]),
+    ])
+  ).filter(Boolean);
+
+  const [paidBy, setPaidBy] = useState<string>(currentUserName);
+  const [splitType, setSplitType] = useState<'EQUAL' | 'EXACT'>('EQUAL');
+  const [customSplits, setCustomSplits] = useState<Record<string, string>>({});
 
   // New expense form
   const [formData, setFormData] = useState({
@@ -47,17 +72,84 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
 
   useEffect(() => {
     loadExpenses();
+    updatePendingQueueCount();
+
+    const handleOnline = () => {
+      setIsOffline(false);
+      handleSyncOfflineQueue();
+    };
+    const handleOffline = () => setIsOffline(true);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, [trip.id]);
+
+  const updatePendingQueueCount = async () => {
+    try {
+      const queue = await offlineStorage.getOfflineQueue();
+      const tripQueue = queue.filter((item) => item.trip_id === trip.id);
+      setPendingSyncCount(tripQueue.length);
+    } catch {
+      // IndexedDB access may be unavailable
+    }
+  };
+
+  const handleSyncOfflineQueue = async () => {
+    try {
+      await offlineStorage.processSyncQueue(async (item) => {
+        try {
+          await tripService.addExpense(item.trip_id, item.data);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      await updatePendingQueueCount();
+      await loadExpenses();
+    } catch (err) {
+      console.warn('Error during offline queue sync:', err);
+    }
+  };
 
   const loadExpenses = async () => {
     try {
       setLoading(true);
       setError('');
-      const data = await tripService.getExpenses(trip.id);
-      setExpenses(data.expenses || []);
-      setAnalytics(data.analytics || null);
+
+      if (!navigator.onLine) {
+        setIsOffline(true);
+        const cached = await offlineStorage.getCachedExpenses(trip.id);
+        if (cached && cached.length > 0) {
+          setExpenses(cached);
+        }
+        return;
+      }
+
+      const [expenseRes, settleRes] = await Promise.all([
+        tripService.getExpenses(trip.id),
+        tripService.getSettlement(trip.id).catch(() => null),
+      ]);
+
+      setExpenses(expenseRes.expenses || []);
+      setAnalytics(expenseRes.analytics || null);
+      if (settleRes) {
+        setSettlement(settleRes);
+      }
+      // Cache expenses for offline resilience
+      await offlineStorage.cacheExpenses(trip.id, expenseRes.expenses || []);
     } catch (err: any) {
-      setError(err?.response?.data?.message || 'Failed to load trip expenses.');
+      // Fallback to offline cache
+      const cached = await offlineStorage.getCachedExpenses(trip.id);
+      if (cached && cached.length > 0) {
+        setExpenses(cached);
+      } else {
+        setError(err?.response?.data?.message || 'Failed to load trip expenses.');
+      }
     } finally {
       setLoading(false);
     }
@@ -67,20 +159,75 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
     e.preventDefault();
     if (!formData.title || !formData.amount) return;
 
+    const amountNum = Number(formData.amount);
+    if (isNaN(amountNum) || amountNum <= 0) return;
+
+    // Calculate splits
+    let splits: any[] = [];
+    if (splitType === 'EQUAL') {
+      const count = tripMembers.length || 1;
+      const share = Math.round((amountNum / count) * 100) / 100;
+      splits = tripMembers.map((m) => ({
+        name: m,
+        amount: share,
+        settled: m === paidBy,
+      }));
+    } else {
+      splits = tripMembers.map((m) => ({
+        name: m,
+        amount: Number(customSplits[m] || 0),
+        settled: m === paidBy,
+      }));
+    }
+
+    const payload = {
+      title: formData.title.trim(),
+      amount: amountNum,
+      category: formData.category,
+      payment_status: formData.payment_status,
+      currency: trip.currency || 'INR',
+      date: formData.date,
+      notes: formData.notes.trim() || undefined,
+      paid_by: paidBy,
+      paid_by_name: paidBy,
+      split_type: splitType,
+      splits: splits,
+    };
+
     try {
       setSubmitting(true);
-      const res = await tripService.addExpense(trip.id, {
-        title: formData.title.trim(),
-        amount: Number(formData.amount),
-        category: formData.category,
-        payment_status: formData.payment_status,
-        currency: trip.currency || 'INR',
-        date: formData.date,
-        notes: formData.notes.trim() || undefined,
-      });
 
+      if (!navigator.onLine) {
+        // Enqueue offline
+        await offlineStorage.enqueueOfflineExpense(trip.id, payload);
+        const tempExpense: Expense = {
+          id: 'offline-' + Date.now(),
+          trip_id: trip.id,
+          user_id: user?.id || 'offline',
+          ...payload,
+          created_at: new Date().toISOString(),
+        };
+        setExpenses((prev) => [tempExpense, ...prev]);
+        await updatePendingQueueCount();
+        setShowAddModal(false);
+        alert('Saved offline! This expense will automatically sync to WanderAI when your device reconnects.');
+        return;
+      }
+
+      const res = await tripService.addExpense(trip.id, payload);
       setExpenses((prev) => [res.expense, ...prev]);
       setAnalytics(res.analytics);
+
+      // Refresh settlement
+      try {
+        const settleRes = await tripService.getSettlement(trip.id);
+        if (settleRes) {
+          setSettlement(settleRes);
+        }
+      } catch {
+        // Non-blocking settlement refresh
+      }
+
       setShowAddModal(false);
       setFormData({
         title: '',
@@ -90,10 +237,30 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
         date: new Date().toISOString().split('T')[0],
         notes: '',
       });
+      setCustomSplits({});
     } catch (err: any) {
       alert(err?.response?.data?.message || 'Failed to record expense.');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSettleDebt = async (debt: SimplifiedDebt) => {
+    try {
+      setSettling(true);
+      await tripService.settleDebt(trip.id, {
+        from: debt.from,
+        to: debt.to,
+        amount: debt.amount,
+        currency: debt.currency,
+      });
+
+      // Reload settlement and expenses to reflect cleared debt
+      await loadExpenses();
+    } catch (err: any) {
+      alert(err?.response?.data?.message || 'Failed to record settlement payment.');
+    } finally {
+      setSettling(false);
     }
   };
 
@@ -103,6 +270,16 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
       const res = await tripService.deleteExpense(trip.id, expenseId);
       setExpenses((prev) => prev.filter((ex) => ex.id !== expenseId));
       setAnalytics(res.analytics);
+
+      // Refresh settlement
+      try {
+        const settleRes = await tripService.getSettlement(trip.id);
+        if (settleRes) {
+          setSettlement(settleRes);
+        }
+      } catch {
+        // Non-blocking
+      }
     } catch (err: any) {
       alert(err?.response?.data?.message || 'Failed to delete expense.');
     }
@@ -120,6 +297,16 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
         prev.map((ex) => (ex.id === expenseId ? res.expense : ex))
       );
       setAnalytics(res.analytics);
+
+      // Refresh settlement
+      try {
+        const settleRes = await tripService.getSettlement(trip.id);
+        if (settleRes) {
+          setSettlement(settleRes);
+        }
+      } catch {
+        // Non-blocking
+      }
     } catch (err: any) {
       alert(err?.response?.data?.message || 'Failed to update payment status.');
     }
@@ -128,8 +315,37 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
   const currencySymbol =
     trip.currency === 'USD' ? '$' : trip.currency === 'EUR' ? '€' : '₹';
 
+  // Total calculated for custom splits
+  const customSplitsSum = Object.values(customSplits).reduce(
+    (sum, val) => sum + (Number(val) || 0),
+    0
+  );
+  const targetAmount = Number(formData.amount || 0);
+  const splitsMatchTarget = Math.abs(customSplitsSum - targetAmount) < 0.05;
+
   return (
     <div className="space-y-8">
+      {/* Offline sync banner if expenses pending */}
+      {pendingSyncCount > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-center justify-between gap-3 text-amber-300">
+          <div className="flex items-center gap-2.5">
+            <WifiOff className="w-5 h-5 shrink-0 text-amber-400" />
+            <div className="text-xs">
+              <span className="font-semibold">{pendingSyncCount} expense(s)</span> queued offline. They will sync automatically when online.
+            </div>
+          </div>
+          {navigator.onLine && (
+            <button
+              onClick={handleSyncOfflineQueue}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl transition-all"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Sync Now</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Analytics Overview Cards */}
       {analytics && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -224,6 +440,121 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
         </div>
       )}
 
+      {/* FEATURE: Group Splitwise Settlement & Balances Widget */}
+      {settlement && (
+        <div className="bg-surface border border-border rounded-2xl p-5 shadow-sm space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-border/70 pb-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <Scale className="w-5 h-5 text-emerald-400" />
+                <h4 className="text-base font-bold text-text">
+                  Group Settlement & Balances
+                </h4>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                  Splitwise Min-Cash-Flow
+                </span>
+              </div>
+              <p className="text-xs text-muted mt-0.5">
+                Real-time debt simplification across all trip participants
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted font-medium">
+                Total Group Spend: <strong className="text-text">{currencySymbol}{settlement.total_group_spending.toLocaleString()}</strong>
+              </span>
+            </div>
+          </div>
+
+          {/* Net Balances List */}
+          <div>
+            <h5 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+              <Users className="w-3.5 h-3.5 text-primary" />
+              <span>Participant Balances</span>
+            </h5>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {settlement.net_balances.map((nb) => {
+                const isCreditor = nb.status === 'gets_back';
+                const isDebtor = nb.status === 'owes';
+
+                return (
+                  <div
+                    key={nb.member}
+                    className="bg-background/70 border border-border/80 rounded-xl p-3 flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="text-sm font-semibold text-text">{nb.member}</div>
+                      <div className="text-[11px] text-muted">
+                        Paid: {currencySymbol}{nb.total_paid.toLocaleString()} • Owed: {currencySymbol}{nb.total_owed.toLocaleString()}
+                      </div>
+                    </div>
+                    <div>
+                      {isCreditor && (
+                        <span className="inline-flex items-center text-xs font-bold px-2.5 py-1 rounded-lg bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                          +{currencySymbol}{nb.abs_balance.toLocaleString()} gets back
+                        </span>
+                      )}
+                      {isDebtor && (
+                        <span className="inline-flex items-center text-xs font-bold px-2.5 py-1 rounded-lg bg-rose-500/15 text-rose-400 border border-rose-500/30">
+                          -{currencySymbol}{nb.abs_balance.toLocaleString()} owes
+                        </span>
+                      )}
+                      {!isCreditor && !isDebtor && (
+                        <span className="inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-lg bg-surface text-muted border border-border">
+                          Settled
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Simplified Debt Transfers */}
+          <div>
+            <h5 className="text-xs font-semibold text-muted uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+              <ArrowRight className="w-3.5 h-3.5 text-secondary" />
+              <span>Simplified Debt Transfers</span>
+            </h5>
+
+            {settlement.simplified_debts.length === 0 ? (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>All group expenses are settled! No one owes anything right now.</span>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {settlement.simplified_debts.map((debt, index) => (
+                  <div
+                    key={index}
+                    className="p-3 rounded-xl bg-background border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-semibold text-rose-400">{debt.from}</span>
+                      <span className="text-muted text-xs">owes</span>
+                      <span className="font-semibold text-emerald-400">{debt.to}</span>
+                      <span className="text-text font-bold ml-1">
+                        {currencySymbol}{debt.amount.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <button
+                      onClick={() => handleSettleDebt(debt)}
+                      disabled={settling}
+                      className="flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs rounded-lg transition-all shadow-sm shadow-emerald-500/20 disabled:opacity-50"
+                    >
+                      <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                      <span>{settling ? 'Settling...' : 'Mark as Settled'}</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Category Breakdown Progress Bar */}
       {analytics && Object.keys(analytics.category_breakdown).length > 0 && (
         <div className="bg-surface p-5 rounded-2xl border border-border">
@@ -262,7 +593,7 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
         <div>
           <h3 className="text-lg font-bold text-text">Logged Expenses</h3>
           <p className="text-xs text-muted">
-            Track daily receipts, accommodation dues, and transportation tickets
+            Track daily receipts, accommodation dues, and shared group costs
           </p>
         </div>
 
@@ -313,11 +644,31 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
                     </div>
 
                     <div>
-                      <div className="font-semibold text-text text-sm">{expense.title}</div>
+                      <div className="font-semibold text-text text-sm flex items-center gap-2">
+                        <span>{expense.title}</span>
+                        {expense.paid_by_name && (
+                          <span className="text-[11px] font-medium text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                            Paid by {expense.paid_by_name}
+                          </span>
+                        )}
+                        {expense.id.startsWith('offline-') && (
+                          <span className="text-[10px] font-bold text-amber-400 bg-amber-500/15 px-2 py-0.5 rounded-full border border-amber-500/30">
+                            Offline Pending
+                          </span>
+                        )}
+                      </div>
                       <div className="flex flex-wrap items-center gap-2 text-xs text-muted mt-0.5">
                         <span className="capitalize">{expense.category}</span>
                         <span>•</span>
                         <span>{expense.date}</span>
+                        {expense.split_type && (
+                          <>
+                            <span>•</span>
+                            <span className="uppercase text-[10px] font-semibold text-primary">
+                              {expense.split_type === 'EQUAL' ? 'Split Equally' : 'Custom Split'}
+                            </span>
+                          </>
+                        )}
                         {expense.notes && (
                           <>
                             <span>•</span>
@@ -374,13 +725,13 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
         </div>
       )}
 
-      {/* Add Expense Modal */}
+      {/* Add Expense Modal with Splitwise Support */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-surface border border-border rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-surface border border-border rounded-2xl max-w-lg w-full p-6 shadow-2xl relative my-8">
             <h4 className="text-lg font-bold text-white mb-1">Add Trip Expense</h4>
             <p className="text-xs text-muted mb-4">
-              Record a paid bill, reservation deposit, or pending commitment.
+              Record a paid bill, reservation deposit, or group shared cost with Splitwise logic.
             </p>
 
             <form onSubmit={handleAddExpense} className="space-y-4">
@@ -406,7 +757,7 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
                   <input
                     type="number"
                     min="1"
-                    step="1"
+                    step="0.01"
                     required
                     placeholder="e.g. 2500"
                     value={formData.amount}
@@ -435,6 +786,118 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
                     ))}
                   </select>
                 </div>
+              </div>
+
+              {/* Group Splitting Section */}
+              <div className="bg-background/80 border border-border rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-emerald-400" />
+                    Splitwise Expense Splitting
+                  </span>
+                  <div className="flex items-center gap-1 bg-surface p-1 rounded-lg border border-border text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setSplitType('EQUAL')}
+                      className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
+                        splitType === 'EQUAL'
+                          ? 'bg-primary text-slate-950 shadow-sm'
+                          : 'text-muted hover:text-white'
+                      }`}
+                    >
+                      Split Equally
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSplitType('EXACT')}
+                      className={`px-2.5 py-1 rounded-md font-semibold transition-all ${
+                        splitType === 'EXACT'
+                          ? 'bg-primary text-slate-950 shadow-sm'
+                          : 'text-muted hover:text-white'
+                      }`}
+                    >
+                      Exact Splits
+                    </button>
+                  </div>
+                </div>
+
+                {/* Paid By Selection */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-muted uppercase tracking-wider mb-1">
+                    Paid by
+                  </label>
+                  <select
+                    value={paidBy}
+                    onChange={(e) => setPaidBy(e.target.value)}
+                    className="w-full bg-surface border border-border rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-primary"
+                  >
+                    {tripMembers.map((m) => (
+                      <option key={m} value={m}>
+                        {m === currentUserName ? `${m} (You)` : m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Equal Split Preview */}
+                {splitType === 'EQUAL' && (
+                  <div className="text-xs text-muted bg-surface/60 p-2.5 rounded-lg border border-border/60">
+                    {targetAmount > 0 ? (
+                      <span className="text-emerald-400 font-semibold">
+                        {currencySymbol}{(targetAmount / (tripMembers.length || 1)).toFixed(2)} per person
+                      </span>
+                    ) : (
+                      'Enter amount to see per-person split'
+                    )}
+                    <span className="text-muted block text-[11px] mt-0.5">
+                      Split across {tripMembers.length} traveler(s): {tripMembers.join(', ')}
+                    </span>
+                  </div>
+                )}
+
+                {/* Exact Splits Custom Fields */}
+                {splitType === 'EXACT' && (
+                  <div className="space-y-2 pt-1">
+                    <div className="text-[11px] text-muted flex justify-between">
+                      <span>Specify exact share per traveler</span>
+                      <span
+                        className={
+                          splitsMatchTarget ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'
+                        }
+                      >
+                        Total: {currencySymbol}{customSplitsSum} / {currencySymbol}{targetAmount}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {tripMembers.map((m) => (
+                        <div key={m} className="flex items-center gap-2 bg-surface p-2 rounded-lg border border-border">
+                          <span className="text-xs text-text font-medium truncate w-24">{m}:</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            placeholder="0"
+                            value={customSplits[m] || ''}
+                            onChange={(e) =>
+                              setCustomSplits({
+                                ...customSplits,
+                                [m]: e.target.value,
+                              })
+                            }
+                            className="w-full bg-background border border-border rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-primary"
+                          />
+                        </div>
+                      ))}
+                    </div>
+
+                    {!splitsMatchTarget && targetAmount > 0 && (
+                      <div className="text-[11px] text-rose-400 font-medium">
+                        ⚠️ The sum of individual splits must equal the total expense amount.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -494,7 +957,7 @@ export const BudgetExpenseTracker: React.FC<BudgetExpenseTrackerProps> = ({ trip
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
+                  disabled={submitting || (splitType === 'EXACT' && !splitsMatchTarget && targetAmount > 0)}
                   className="px-5 py-2 rounded-xl text-sm font-semibold bg-primary hover:bg-primary/90 text-background transition-colors disabled:opacity-50"
                 >
                   {submitting ? 'Saving...' : 'Save Expense'}

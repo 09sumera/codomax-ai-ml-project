@@ -1,0 +1,22 @@
+[
+  {
+    "user_id": "usr_demo_fleet_mgr",
+    "name": "Alex Mercer",
+    "email": "demo@routeshield.ai",
+    "role": "Chief Logistics Controller",
+    "company": "Pacific-Atlantic Cargo Line",
+    "password_hash": "scrypt:32768:8:1$oSYAZnJhcJWXPbZf$584675a8f9beaac2e06bfe807b2274d0d75853549cbec16e528eb1b8b92c5b9f738a54418747265343e6b732bd9b5fd7497479831016894544d8b0e140906ac5",
+    "created_at": "2026-10-18T06:34:15.257536+00:00",
+    "updated_at": "2026-10-18T06:34:15.257557+00:00"
+  },
+  {
+    "user_id": "usr_973b83fd73f5",
+    "name": "Tejesh Kurubara",
+    "email": "tejeshkurubara@gmail.com",
+    "role": "Fleet Dispatcher",
+    "company": "Global Logistics Corp",
+    "password_hash": "scrypt:32768:8:1$QIp4M6Af8wzJHPLK$ab2c44502369bea1b99117d8d104377587fb9b5959b45197f64f42720c4b6c67038ab12af9d708e36097602a8d463811698e72f79410e141a22ea28a4a52b93b",
+    "created_at": "2026-10-18T17:32:04.307975+00:00",
+    "updated_at": "2026-10-18T17:32:04.307975+00:00"
+  }
+]

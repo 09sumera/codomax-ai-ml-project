@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Valid booking statuses
 # Important: Default is 'planned' or 'quoted'. It must never default to 'confirmed'.
 VALID_STATUSES = {"planned", "quoted", "pending", "confirmed", "cancelled", "refunded"}
-VALID_TYPES = {"flight", "hotel", "train", "bus", "car_rental", "activity", "other"}
+VALID_TYPES = {"flight", "hotel", "train", "bus", "car_rental", "rental_car", "activity", "other"}
 
 
 def _serialize_booking(booking: dict) -> dict:
@@ -48,7 +48,7 @@ def create_booking(user_id: str, trip_id: str, data: dict) -> dict:
     if status not in VALID_STATUSES:
         status = "planned"
 
-    booking_type = data.get("booking_type", "flight").lower()
+    booking_type = (data.get("booking_type") or data.get("type") or "flight").lower()
     if booking_type not in VALID_TYPES:
         booking_type = "other"
 
@@ -56,6 +56,7 @@ def create_booking(user_id: str, trip_id: str, data: dict) -> dict:
         "trip_id": ObjectId(trip_id) if ObjectId.is_valid(trip_id) else trip_id,
         "user_id": ObjectId(user_id) if ObjectId.is_valid(user_id) else user_id,
         "booking_type": booking_type,
+        "type": booking_type,
         "title": data.get("title", f"Reservation - {booking_type.capitalize()}"),
         "provider": data.get("provider", "Direct"),
         "reference_number": data.get("reference_number", ""),

@@ -17,6 +17,20 @@ def ensure_indexes():
 
 def serialize_expense(exp: dict) -> dict:
     created_at = exp.get("created_at")
+    splits_raw = exp.get("splits", [])
+    serialized_splits = []
+    for s in splits_raw:
+        serialized_splits.append({
+            "user_id": str(s.get("user_id") or ""),
+            "name": s.get("name", "Traveler"),
+            "amount": round(float(s.get("amount", 0.0)), 2),
+            "percentage": round(float(s.get("percentage", 0.0)), 2) if s.get("percentage") is not None else None,
+            "settled": bool(s.get("settled", False)),
+        })
+
+    paid_by_name = exp.get("paid_by_name") or exp.get("paid_by") or "You"
+    paid_by_user_id = str(exp.get("paid_by_user_id") or exp.get("user_id"))
+
     return {
         "id": str(exp["_id"]),
         "trip_id": str(exp["trip_id"]),
@@ -28,6 +42,11 @@ def serialize_expense(exp: dict) -> dict:
         "payment_status": exp.get("payment_status", "paid"),  # paid, pending, refunded, cancelled
         "description": exp.get("description", ""),
         "booking_reference": exp.get("booking_reference", ""),
+        "paid_by": paid_by_name,
+        "paid_by_name": paid_by_name,
+        "paid_by_user_id": paid_by_user_id,
+        "split_type": exp.get("split_type", "EQUAL").upper(),
+        "splits": serialized_splits,
         "created_at": created_at.isoformat() if created_at else None,
     }
 
@@ -38,6 +57,22 @@ def create_expense(user_id: str, trip_id: str, data: dict) -> dict:
         raise ValueError("Invalid user_id or trip_id")
 
     amount = round(float(data.get("amount", 0.0)), 2)
+    paid_by_name = (data.get("paid_by_name") or data.get("paid_by") or "You").strip()
+    paid_by_user_id = str(data.get("paid_by_user_id") or owner)
+    split_type = (data.get("split_type") or "EQUAL").upper().strip()
+    splits_raw = data.get("splits") or []
+
+    # Clean and validate splits
+    splits = []
+    for s in splits_raw:
+        splits.append({
+            "user_id": str(s.get("user_id") or ""),
+            "name": str(s.get("name") or "Traveler").strip(),
+            "amount": round(float(s.get("amount", 0.0)), 2),
+            "percentage": float(s.get("percentage")) if s.get("percentage") is not None else None,
+            "settled": bool(s.get("settled", False)),
+        })
+
     doc = {
         "trip_id": tid,
         "user_id": owner,
@@ -48,6 +83,11 @@ def create_expense(user_id: str, trip_id: str, data: dict) -> dict:
         "payment_status": (data.get("payment_status") or "paid").lower().strip(),
         "description": (data.get("description") or "").strip(),
         "booking_reference": (data.get("booking_reference") or "").strip(),
+        "paid_by": paid_by_name,
+        "paid_by_name": paid_by_name,
+        "paid_by_user_id": paid_by_user_id,
+        "split_type": split_type,
+        "splits": splits,
         "created_at": datetime.now(timezone.utc),
     }
     result = _expenses().insert_one(doc)
@@ -59,7 +99,8 @@ def get_expenses_by_trip(user_id: str, trip_id: str) -> list:
     owner, tid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or tid is None:
         return []
-    cursor = _expenses().find({"user_id": owner, "trip_id": tid}).sort("date", -1)
+    # All members of the trip can view trip expenses
+    cursor = _expenses().find({"trip_id": tid}).sort("date", -1)
     return [serialize_expense(e) for e in cursor]
 
 
@@ -201,3 +242,203 @@ def get_trip_budget_analytics(user_id: str, trip_id: str, trip_data: dict) -> di
 
     expenses = get_expenses_by_trip(user_id, trip_id)
     return compute_budget_analytics(expenses, trip_data)
+
+
+def compute_trip_settlement(trip: dict, expenses: list) -> dict:
+    """
+    Splitwise settlement engine:
+    1. Computes total paid vs total owed per traveler:
+       Balance(u) = Total_Paid(u) - Total_Owed(u)
+    2. Executes greedy min-cash-flow debt simplification to determine minimal debt transfers.
+    """
+    currency = trip.get("display_currency") or trip.get("currency", "INR")
+    
+    # Gather all trip members
+    members_set = set()
+    collaborators = trip.get("collaborators", [])
+    for c in collaborators:
+        c_name = c.get("name")
+        if c_name:
+            members_set.add(c_name.strip())
+
+    if not members_set:
+        members_set.add("You")
+    else:
+        members_set.add("You")
+
+    # Also include any names seen in expenses
+    for exp in expenses:
+        payer = exp.get("paid_by_name") or exp.get("paid_by")
+        if payer:
+            members_set.add(str(payer).strip())
+        for s in exp.get("splits", []):
+            s_name = s.get("name")
+            if s_name:
+                members_set.add(str(s_name).strip())
+
+    all_members = sorted(list(members_set))
+
+    # Balances dictionary: balance > 0 means person gets back; balance < 0 means person owes
+    balances = {m: 0.0 for m in all_members}
+    total_paid_by_member = {m: 0.0 for m in all_members}
+    total_owed_by_member = {m: 0.0 for m in all_members}
+    total_expenses_sum = 0.0
+
+    valid_expenses = [
+        e for e in expenses 
+        if str(e.get("payment_status", "paid")).lower() in ("paid", "confirmed")
+    ]
+
+    for exp in valid_expenses:
+        amt = float(exp.get("amount", 0.0))
+        payer = str(exp.get("paid_by_name") or exp.get("paid_by") or "You").strip()
+        if payer not in balances:
+            balances[payer] = 0.0
+            total_paid_by_member[payer] = 0.0
+            total_owed_by_member[payer] = 0.0
+
+        is_settle = (
+            bool(exp.get("is_settlement"))
+            or str(exp.get("category", "")).lower() == "settlement"
+            or str(exp.get("booking_reference", "")).startswith("SETTLE-")
+        )
+
+        if is_settle:
+            # Settlement payment: debtor pays creditor to reduce debt balance
+            balances[payer] += amt
+            splits = exp.get("splits") or []
+            if splits:
+                for s in splits:
+                    recipient = str(s.get("name") or "You").strip()
+                    if recipient not in balances:
+                        balances[recipient] = 0.0
+                        total_paid_by_member[recipient] = 0.0
+                        total_owed_by_member[recipient] = 0.0
+                    s_amt = float(s.get("amount", amt))
+                    balances[recipient] -= s_amt
+        else:
+            # Ordinary travel expense: payer is credited the full payment,
+            # and each participant in splits (including payer) is debited their consumed share.
+            total_expenses_sum += amt
+            balances[payer] += amt
+            total_paid_by_member[payer] += amt
+
+            splits = exp.get("splits") or []
+            if splits:
+                for s in splits:
+                    borrower = str(s.get("name") or "You").strip()
+                    if borrower not in balances:
+                        balances[borrower] = 0.0
+                        total_paid_by_member[borrower] = 0.0
+                        total_owed_by_member[borrower] = 0.0
+
+                    s_amt = float(s.get("amount", 0.0))
+                    balances[borrower] -= s_amt
+                    total_owed_by_member[borrower] += s_amt
+            else:
+                # Equal split among all known members if no explicit split is saved
+                n = len(all_members) or 1
+                split_share = round(amt / n, 2)
+                for m in all_members:
+                    balances[m] -= split_share
+                    total_owed_by_member[m] += split_share
+
+    # Net balances list
+    net_balances = []
+    for member in all_members:
+        bal = round(balances[member], 2)
+        status = "gets_back" if bal > 0.01 else ("owes" if bal < -0.01 else "settled")
+        net_balances.append({
+            "member": member,
+            "balance": bal,
+            "abs_balance": abs(bal),
+            "total_paid": round(total_paid_by_member.get(member, 0.0), 2),
+            "total_owed": round(total_owed_by_member.get(member, 0.0), 2),
+            "status": status,
+        })
+
+    # Sort net balances by balance descending
+    net_balances.sort(key=lambda x: x["balance"], reverse=True)
+
+    # Greedy Min-Cash-Flow Algorithm
+    creditors = []
+    debtors = []
+    for member, bal in balances.items():
+        r_bal = round(bal, 2)
+        if r_bal > 0.01:
+            creditors.append([r_bal, member])
+        elif r_bal < -0.01:
+            debtors.append([abs(r_bal), member])
+
+    creditors.sort(key=lambda x: x[0], reverse=True)
+    debtors.sort(key=lambda x: x[0], reverse=True)
+
+    simplified_debts = []
+    c_idx = 0
+    d_idx = 0
+
+    while c_idx < len(creditors) and d_idx < len(debtors):
+        cred_amt, cred_name = creditors[c_idx]
+        debt_amt, debt_name = debtors[d_idx]
+
+        settle_amt = round(min(cred_amt, debt_amt), 2)
+        if settle_amt > 0.01:
+            simplified_debts.append({
+                "from": debt_name,
+                "to": cred_name,
+                "amount": settle_amt,
+                "currency": currency,
+            })
+
+        creditors[c_idx][0] = round(creditors[c_idx][0] - settle_amt, 2)
+        debtors[d_idx][0] = round(debtors[d_idx][0] - settle_amt, 2)
+
+        if creditors[c_idx][0] <= 0.01:
+            c_idx += 1
+        if debtors[d_idx][0] <= 0.01:
+            d_idx += 1
+
+    return {
+        "net_balances": net_balances,
+        "simplified_debts": simplified_debts,
+        "total_group_spending": round(total_expenses_sum, 2),
+        "currency": currency,
+        "members": all_members,
+    }
+
+
+def record_debt_settlement(user_id: str, trip_id: str, data: dict) -> dict:
+    """
+    Record a debt settlement between two group members.
+    Creates a settlement expense transaction that balances the debt.
+    """
+    from_name = str(data.get("from") or data.get("from_name") or "").strip()
+    to_name = str(data.get("to") or data.get("to_name") or "").strip()
+    amount = round(float(data.get("amount", 0.0)), 2)
+    currency = str(data.get("currency") or "INR").upper().strip()
+
+    if not from_name or not to_name or amount <= 0:
+        raise ValueError("Valid from, to, and positive amount are required to settle debt.")
+
+    expense_payload = {
+        "category": "other",
+        "is_settlement": True,
+        "amount": amount,
+        "currency": currency,
+        "date": data.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "payment_status": "paid",
+        "description": f"Settlement payment: {from_name} paid {to_name}",
+        "booking_reference": f"SETTLE-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "paid_by": from_name,
+        "paid_by_name": from_name,
+        "split_type": "EXACT",
+        "splits": [
+            {
+                "name": to_name,
+                "amount": amount,
+                "settled": True,
+            }
+        ],
+    }
+
+    return create_expense(user_id, trip_id, expense_payload)

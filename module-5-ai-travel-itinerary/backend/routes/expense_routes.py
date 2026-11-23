@@ -99,3 +99,44 @@ def get_analytics(trip_id):
 
     analytics = expense_model.get_trip_budget_analytics(user_id, trip_id, trip)
     return success_response("Analytics calculated successfully.", {"analytics": analytics})
+
+
+@expenses_bp.route("/settlement", methods=["GET"])
+@token_required
+def get_settlement(trip_id):
+    user_id = get_current_user_id()
+    trip = trip_model.get_trip_by_id(user_id, trip_id)
+    if trip is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    expenses = expense_model.get_expenses_by_trip(user_id, trip_id)
+    settlement = expense_model.compute_trip_settlement(trip, expenses)
+    return success_response("Settlement calculated successfully.", settlement)
+
+
+@expenses_bp.route("/settle", methods=["POST"])
+@token_required
+def settle_debt_route(trip_id):
+    user_id = get_current_user_id()
+    trip = trip_model.get_trip_by_id(user_id, trip_id)
+    if trip is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return error_response("Request body must be valid JSON.", 400)
+
+    try:
+        expense = expense_model.record_debt_settlement(user_id, trip_id, data)
+        all_expenses = expense_model.get_expenses_by_trip(user_id, trip_id)
+        settlement = expense_model.compute_trip_settlement(trip, all_expenses)
+        analytics = expense_model.get_trip_budget_analytics(user_id, trip_id, trip)
+        return success_response(
+            "Debt settlement recorded successfully.",
+            {"expense": expense, "settlement": settlement, "analytics": analytics},
+            201,
+        )
+    except ValueError as exc:
+        return error_response(str(exc), 400)
+    except Exception as exc:
+        return error_response("Failed to record debt settlement.", 500)

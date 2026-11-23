@@ -1,81 +1,80 @@
+import logging
+
 from flask import Flask
 from flask_cors import CORS
+from pymongo.errors import PyMongoError
 from werkzeug.exceptions import HTTPException
-from backend.config.config import Config
-from backend.routes.health_routes import health_bp
-from backend.routes.prediction_routes import prediction_bp
-from backend.routes.route_routes import route_bp
-from backend.controllers.route_controller import handle_analyze
-from backend.utils.logger import get_logger
-from backend.utils.response import success_response, error_response
 
-logger = get_logger(__name__)
+from config import Config
+from models import DatabaseError, get_client, init_db
+from routes import register_blueprints
+from utils import error_response, success_response
 
-def create_app():
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def create_app() -> Flask:
+    problems = Config.fatal_problems()
+    if problems:
+        raise RuntimeError("Invalid configuration: " + " ".join(problems))
+    for warning in Config.warnings():
+        logger.warning(warning)
+
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = Config.MAX_CONTENT_LENGTH
     app.url_map.strict_slashes = False
+
     CORS(
-    app,
-    resources={r"/*": {
-        "origins": [
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "https://route-shield-eight.vercel.app"
-        ],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": [
-            "Content-Type",
-            "Authorization",
-            "X-User-Id"
-        ]
-        }}
+        app,
+        resources={r"/*": {"origins": Config.CORS_ORIGINS}},
+        supports_credentials=True,
+        allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
-    app.config.from_object(Config)
-    
-    @app.route('/', methods=['GET'])
-    def root_health():
-        return success_response(
-            data={'status': 'healthy'},
-            message='RouteShield API is running'
-        )
 
-    app.register_blueprint(health_bp)
-    app.register_blueprint(prediction_bp)
-    app.register_blueprint(route_bp)
-    
-    from backend.routes.saved_routes_bp import saved_routes_bp
-    app.register_blueprint(saved_routes_bp)
+    init_db()  # logs on failure, never crashes the app
+    register_blueprints(app)
+    register_error_handlers(app)
 
-    from backend.routes.safety_routes import safety_bp
-    app.register_blueprint(safety_bp)
+    @app.route("/", methods=["GET"])
+    def index():
+        return success_response("WanderAI API is running.")
 
-    from backend.routes.rag_routes import rag_bp
-    app.register_blueprint(rag_bp)
+    @app.route("/health", methods=["GET"])
+    @app.route("/api/health", methods=["GET"])
+    def health():
+        try:
+            get_client().admin.command("ping")
+            return success_response("Service is running.", {"status": "healthy", "database": "connected"})
+        except (DatabaseError, PyMongoError, Exception) as exc:
+            logger.warning("Database ping failed during health check: %s", exc)
+            return error_response("Service is running but the database is unavailable.", 503)
 
-    from backend.routes.auth_routes import auth_bp
-    app.register_blueprint(auth_bp)
-
-    from backend.services.user_service import UserService
-    try:
-        UserService.seed_demo_user()
-    except Exception as e:
-        logger.warning(f"Could not seed demo user: {e}")
-
-    app.add_url_rule('/api/analyze', view_func=handle_analyze, methods=['POST'], strict_slashes=False)
-    
-    @app.errorhandler(HTTPException)
-    def handle_http_exception(e):
-        return error_response(code=e.name.upper().replace(' ', '_'), message=e.description, status_code=e.code)
-
-    @app.errorhandler(Exception)
-    def global_error(e):
-        logger.error(f'Error: {e}')
-        return error_response('INTERNAL_ERROR', str(e), status_code=500)
-        
     return app
 
-if __name__ == '__main__':
-    app = create_app()
-    app.run(host='0.0.0.0', port=Config.PORT)
+
+def register_error_handlers(app: Flask):
+    @app.errorhandler(HTTPException)
+    def handle_http_error(exc):
+        return error_response(exc.description or exc.name, exc.code or 500)
+
+    @app.errorhandler(DatabaseError)
+    @app.errorhandler(PyMongoError)
+    def handle_database_error(exc):
+        logger.error("Database error (%s).", exc.__class__.__name__)
+        return error_response("The database is currently unavailable. Please try again later.", 503)
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(exc):
+        logger.exception("Unhandled server error.")
+        return error_response("An unexpected server error occurred.", 500)
+
+
+app = create_app()
+
+if __name__ == "__main__":
+    app.run(host=Config.HOST, port=Config.PORT, debug=Config.DEBUG)

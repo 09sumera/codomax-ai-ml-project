@@ -87,6 +87,8 @@ TRANSPORT_SPEEDS = {
     "bus": 20.0,
     "car": 35.0,
     "cab": 35.0,
+    "driving": 40.0,
+    "rental_car": 40.0,
     "flight": 450.0,
     "default": 25.0,
 }
@@ -100,6 +102,8 @@ TRANSPORT_COST_PER_KM = {
     "bus": 2.5,
     "car": 18.0,
     "cab": 22.0,
+    "driving": 8.0,
+    "rental_car": 8.0,
     "default": 12.0,
 }
 
@@ -569,6 +573,30 @@ def optimize_trip_route(
     conflicts = []
     recommendations = []
 
+    # Check for active car rental reservations in trip
+    has_active_rental = False
+    rental_car_name = ""
+    rental_start_date = None
+    rental_end_date = None
+    try:
+        from models import booking_model
+        u_id = str(trip.get("user_id") or "")
+        t_id = str(trip.get("id") or trip.get("_id") or "")
+        if u_id and t_id:
+            b_list = booking_model.get_bookings_by_trip(u_id, t_id)
+            r_b = [b for b in b_list if str(b.get("booking_type", "")).lower() in ("rental_car", "car_rental")]
+            if r_b:
+                has_active_rental = True
+                b0 = r_b[0]
+                rental_car_name = b0.get("details", {}).get("vehicle_name") or b0.get("title", "Rental Vehicle")
+                rental_start_date = b0.get("start_date")
+                rental_end_date = b0.get("end_date")
+                recommendations.append(
+                    f"🚗 Active Car Rental ({rental_car_name}): Itinerary routes optimized for direct private road driving."
+                )
+    except Exception:
+        pass
+
     processed_days = []
 
     for day in raw_days:
@@ -633,7 +661,10 @@ def optimize_trip_route(
 
                 # Determine mode for leg
                 if mode == "auto":
-                    leg_mode = "walking" if straight_km <= max_walking_km else ("transit" if straight_km <= 10.0 else "cab")
+                    if has_active_rental:
+                        leg_mode = "walking" if straight_km <= max_walking_km else "driving"
+                    else:
+                        leg_mode = "walking" if straight_km <= max_walking_km else ("transit" if straight_km <= 10.0 else "cab")
                 else:
                     leg_mode = mode
 

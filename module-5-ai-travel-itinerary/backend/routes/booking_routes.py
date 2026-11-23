@@ -5,11 +5,13 @@ and full booking reservation management.
 """
 
 from flask import Blueprint, request
-from models import trip_model, booking_model
-from services import flight_service, hotel_service, transport_service
+from models import trip_model, booking_model, expense_model
+from services import flight_service, hotel_service, transport_service, rental_service, currency_service
 from utils import error_response, success_response
 from utils.auth import get_current_user_id, token_required
+from datetime import datetime
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +156,167 @@ def get_emergency_services():
     except Exception as exc:
         logger.error(f"Emergency directory error: {exc}", exc_info=True)
         return error_response("Failed to retrieve emergency services.", 500)
+
+
+@travel_services_bp.route("/rentals/search", methods=["GET"])
+def search_rentals():
+    """
+    Search available rental vehicles for a given location, date range, passenger count,
+    vehicle category, and transmission preference.
+    """
+    location = request.args.get("location", "").strip()
+    pickup_date = request.args.get("pickup_date", "").strip()
+    dropoff_date = request.args.get("dropoff_date", "").strip()
+    category = request.args.get("category", "").strip()
+    transmission = request.args.get("transmission", "").strip()
+    currency = request.args.get("currency", "INR").strip()
+
+    try:
+        passengers = int(request.args.get("passengers", 1))
+    except (ValueError, TypeError):
+        passengers = 1
+
+    if not location:
+        return error_response("Location is required for vehicle rental search.", 400)
+
+    try:
+        result = rental_service.search_rentals(
+            location=location,
+            pickup_date=pickup_date or None,
+            dropoff_date=dropoff_date or None,
+            passengers=passengers,
+            category=category or None,
+            transmission=transmission or None,
+            currency=currency,
+        )
+        return success_response("Rental vehicles fetched successfully.", result)
+    except Exception as exc:
+        logger.error(f"Rental vehicle search error: {exc}", exc_info=True)
+        return error_response("Failed to search rental vehicles.", 500)
+
+
+@travel_services_bp.route("/trips/<trip_id>/rentals/book", methods=["POST"])
+@token_required
+def book_rental_vehicle(trip_id):
+    """
+    Book a rental vehicle for a trip:
+    - Validates user auth & trip ownership.
+    - Saves reservation to the bookings collection with type: "rental_car".
+    - Automatically logs a matching entry in the expenses collection under "Transportation" category.
+    - Uses currency_service.py to auto-convert the rental cost to the trip's home currency.
+    - Returns booking, expense, and updated budget analytics.
+    """
+    user_id = get_current_user_id()
+    trip = trip_model.get_trip_by_id(user_id, trip_id)
+    if trip is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return error_response("Request body must be valid JSON.", 400)
+
+    vehicle_name = (data.get("vehicle_name") or data.get("title") or "Rental Vehicle").strip()
+    provider = (data.get("provider") or "Direct Rental").strip()
+    pickup_location = (data.get("pickup_location") or trip.get("destination") or "Airport Hub").strip()
+    dropoff_location = (data.get("dropoff_location") or pickup_location).strip()
+    pickup_date = (data.get("pickup_date") or data.get("start_date") or trip.get("start_date") or "").strip()
+    dropoff_date = (data.get("dropoff_date") or data.get("end_date") or trip.get("end_date") or "").strip()
+    category = (data.get("category") or "Economy / Compact").strip()
+    transmission = (data.get("transmission") or "Automatic").strip()
+
+    days = int(data.get("days") or 1)
+    if days < 1:
+        days = 1
+
+    trip_currency = (trip.get("currency") or "INR").upper().strip()
+    rental_currency = (data.get("currency") or trip_currency).upper().strip()
+
+    try:
+        raw_amount = float(data.get("total_price") or data.get("amount") or 0.0)
+    except (ValueError, TypeError):
+        raw_amount = 0.0
+
+    # Auto-convert rental cost to trip's home currency if currencies differ
+    if rental_currency != trip_currency and raw_amount > 0:
+        conv = currency_service.convert_currency(raw_amount, rental_currency, trip_currency)
+        converted_amount = round(conv["converted_amount"], 2)
+    else:
+        converted_amount = round(raw_amount, 2)
+
+    ref_number = data.get("reference_number") or f"REN-{uuid.uuid4().hex[:8].upper()}"
+
+    # 1. Create booking reservation with type: "rental_car"
+    booking_payload = {
+        "booking_type": "rental_car",
+        "type": "rental_car",
+        "title": f"Rental Car: {vehicle_name} ({provider})",
+        "provider": provider,
+        "reference_number": ref_number,
+        "status": data.get("status", "confirmed").lower(),
+        "amount": converted_amount,
+        "currency": trip_currency,
+        "start_date": pickup_date,
+        "end_date": dropoff_date,
+        "details": {
+            "vehicle_name": vehicle_name,
+            "category": category,
+            "transmission": transmission,
+            "pickup_location": pickup_location,
+            "dropoff_location": dropoff_location,
+            "pickup_date": pickup_date,
+            "dropoff_date": dropoff_date,
+            "days": days,
+            "daily_rate": data.get("daily_rate"),
+            "original_currency": rental_currency,
+            "original_amount": raw_amount,
+            "seats": data.get("seats"),
+            "bags": data.get("bags"),
+            "unlimited_mileage": data.get("unlimited_mileage", True),
+            "spec_tags": data.get("spec_tags", []),
+            "badge": data.get("badge", ""),
+            "image_url": data.get("image_url", ""),
+            "cancellation_policy": data.get("cancellation_policy", ""),
+        },
+        "booking_url": data.get("booking_url", ""),
+        "notes": f"Pre-booked vehicle rental ({days} days) for {trip.get('destination', '')}.",
+    }
+
+    try:
+        new_booking = booking_model.create_booking(user_id, trip_id, booking_payload)
+    except Exception as exc:
+        logger.error(f"Failed to create rental car booking: {exc}", exc_info=True)
+        return error_response("Failed to save rental car booking.", 500)
+
+    # 2. Automatically log a matching entry in expenses under "Transportation" category
+    expense_payload = {
+        "category": "transport",
+        "amount": converted_amount,
+        "currency": trip_currency,
+        "date": pickup_date or datetime.now().strftime("%Y-%m-%d"),
+        "payment_status": "paid",
+        "description": f"Vehicle Rental: {vehicle_name} ({provider}) - {days} days",
+        "booking_reference": ref_number,
+    }
+
+    try:
+        new_expense = expense_model.create_expense(user_id, trip_id, expense_payload)
+    except Exception as exc:
+        logger.error(f"Failed to log rental car expense: {exc}", exc_info=True)
+        new_expense = None
+
+    # 3. Compute updated budget analytics
+    all_expenses = expense_model.get_expenses_by_trip(user_id, trip_id)
+    analytics = expense_model.compute_budget_analytics(all_expenses, trip)
+
+    return success_response(
+        "Vehicle rental confirmed and logged to expenses successfully.",
+        {
+            "booking": new_booking,
+            "expense": new_expense,
+            "analytics": analytics,
+        },
+        201,
+    )
 
 
 # ============================================================================

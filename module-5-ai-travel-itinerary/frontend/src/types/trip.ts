@@ -1,6 +1,17 @@
+export interface Collaborator {
+  user_id: string;
+  name: string;
+  email: string;
+  role: 'owner' | 'editor' | 'viewer';
+  joined_at?: string;
+}
+
 export interface Trip {
   id: string;
   user_id: string;
+  owner_id?: string;
+  collaborators?: Collaborator[];
+  invite_code?: string;
   title: string;
   destination: string;
   origin?: string;
@@ -48,18 +59,58 @@ export interface TripRequest {
   intermediate_destinations?: string[];
 }
 
+export interface ExpenseSplit {
+  user_id?: string;
+  name: string;
+  amount: number;
+  percentage?: number;
+  settled: boolean;
+}
+
 export interface Expense {
   id: string;
   trip_id: string;
-  title: string;
+  user_id?: string;
+  title?: string;
+  description?: string;
   amount: number;
-  category: 'accommodation' | 'transport' | 'activities' | 'food' | 'shopping' | 'emergency' | 'other';
+  category: 'accommodation' | 'transport' | 'activities' | 'food' | 'shopping' | 'emergency' | 'other' | string;
   currency: string;
   payment_status: 'paid' | 'pending' | 'refunded' | 'cancelled';
   date: string;
+  booking_reference?: string;
   notes?: string;
+  paid_by?: string;
+  paid_by_name?: string;
+  paid_by_user_id?: string;
+  split_type?: 'EQUAL' | 'EXACT' | 'PERCENTAGE';
+  splits?: ExpenseSplit[];
   created_at?: string;
   updated_at?: string;
+}
+
+export interface SimplifiedDebt {
+  from: string;
+  to: string;
+  amount: number;
+  currency: string;
+}
+
+export interface NetBalance {
+  member: string;
+  balance: number;
+  abs_balance: number;
+  total_paid: number;
+  total_owed: number;
+  status: 'gets_back' | 'owes' | 'settled';
+}
+
+export interface SettlementData {
+  net_balances: NetBalance[];
+  simplified_debts: SimplifiedDebt[];
+  total_group_spending: number;
+  currency: string;
+  members: string[];
 }
 
 export interface CategorySummary {
@@ -124,6 +175,33 @@ export interface HotelOffer {
   is_demo_offer?: boolean;
 }
 
+export interface RentalOffer {
+  id: string;
+  vehicle_name: string;
+  category: 'Economy / Compact' | 'SUV' | 'Electric / Hybrid' | 'Luxury' | 'Van / Minivan' | string;
+  provider: string;
+  rating: number;
+  review_count: number;
+  badge: string;
+  image_url: string;
+  daily_rate: number;
+  total_price: number;
+  currency: string;
+  seats: number;
+  bags: number;
+  transmission: 'Automatic' | 'Manual' | string;
+  air_conditioning: boolean;
+  unlimited_mileage: boolean;
+  cancellation_policy: string;
+  spec_tags: string[];
+  pickup_location: string;
+  dropoff_location: string;
+  pickup_date: string;
+  dropoff_date: string;
+  days: number;
+  is_demo_offer?: boolean;
+}
+
 export interface TransportRouteOption {
   mode: string;
   name: string;
@@ -161,7 +239,7 @@ export interface EmergencyServices {
 export interface Booking {
   id: string;
   trip_id: string;
-  booking_type: 'flight' | 'hotel' | 'train' | 'bus' | 'car_rental' | 'activity' | 'other';
+  booking_type: 'flight' | 'hotel' | 'train' | 'bus' | 'car_rental' | 'rental_car' | 'activity' | 'other';
   title: string;
   provider: string;
   reference_number?: string;

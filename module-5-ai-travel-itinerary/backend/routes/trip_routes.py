@@ -625,3 +625,231 @@ def update_display_currency(trip_id):
         return error_response("Trip not found or update failed.", 404)
 
     return success_response("Display currency updated successfully.", {"trip": updated_trip})
+
+
+# ==============================================================================
+# FEATURE SET 1: GROUP COLLABORATION & INVITES
+# ==============================================================================
+
+@trips_bp.route("/<trip_id>/collaborators/invite", methods=["POST"])
+@token_required
+def invite_trip_collaborators(trip_id):
+    """
+    Generate or regenerate a 6-character alphanumeric invite code & shareable link.
+    """
+    user_id = get_current_user_id()
+    trip = trip_model.get_trip_by_id(user_id, trip_id)
+    if trip is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    code = trip_model.generate_trip_invite_code(user_id, trip_id)
+    if not code:
+        return error_response("Failed to generate invite code.", 500)
+
+    return success_response(
+        "Invite code generated successfully.",
+        {
+            "invite_code": code,
+            "share_url": f"/join?code={code}",
+        }
+    )
+
+
+@trips_bp.route("/join", methods=["POST"])
+@token_required
+def join_trip_route():
+    """
+    Join a shared trip via 6-character invite code.
+    Grants the authenticated user collaborator editor access.
+    """
+    user_id = get_current_user_id()
+    data = request.get_json(silent=True) or {}
+    invite_code = (data.get("invite_code") or data.get("code") or "").strip().upper()
+
+    if not invite_code:
+        return error_response("Invite code is required.", 400)
+
+    trip, message = trip_model.join_trip_by_code(user_id, invite_code)
+    if not trip:
+        return error_response(message, 404)
+
+    return success_response(message, {"trip": trip})
+
+
+@trips_bp.route("/<trip_id>/collaborators", methods=["GET"])
+@token_required
+def get_trip_collaborators_route(trip_id):
+    """
+    Fetch the list of trip collaborators along with the owner and invite code.
+    """
+    user_id = get_current_user_id()
+    data = trip_model.get_trip_collaborators(user_id, trip_id)
+    if data is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    return success_response("Collaborators retrieved successfully.", data)
+
+
+@trips_bp.route("/<trip_id>/collaborators/<target_user_id>", methods=["DELETE"])
+@token_required
+def remove_trip_collaborator_route(trip_id, target_user_id):
+    """
+    Owner revokes collaborator access from a trip.
+    """
+    owner_id = get_current_user_id()
+    success = trip_model.remove_trip_collaborator(owner_id, trip_id, target_user_id)
+    if not success:
+        return error_response("Failed to remove collaborator. Only trip owners can revoke access.", 403)
+
+    return success_response("Collaborator access revoked successfully.")
+
+
+# ==============================================================================
+# FEATURE SET 2: CALENDAR EXPORT (.ICS)
+# ==============================================================================
+
+@trips_bp.route("/<trip_id>/export/ics", methods=["GET"])
+@token_required
+def export_trip_calendar_ics(trip_id):
+    """
+    Export the full trip itinerary, schedule, and reservations to RFC 5545 .ics format.
+    Compatible with Apple Calendar, Google Calendar, and Microsoft Outlook.
+    """
+    from flask import Response
+    from models import booking_model
+    from datetime import timezone
+    user_id = get_current_user_id()
+    trip = trip_model.get_trip_by_id(user_id, trip_id)
+    if trip is None:
+        return error_response("Trip not found or unauthorized.", 404)
+
+    bookings = booking_model.get_bookings_by_trip(user_id, trip_id)
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//WanderAI//Travel Planner 2.0//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{trip.get('title') or 'Trip to ' + trip.get('destination', 'Travel')}",
+        "X-WR-TIMEZONE:UTC",
+    ]
+
+    now_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    def _sanitize(text: str) -> str:
+        if not text:
+            return ""
+        return str(text).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+    trip_start_date = None
+    if trip.get("start_date"):
+        try:
+            trip_start_date = datetime.strptime(trip["start_date"], "%Y-%m-%d").date()
+        except ValueError:
+            trip_start_date = None
+
+    # 1. Activities from itinerary
+    itinerary = trip.get("itinerary", {})
+    days = itinerary.get("days", []) if isinstance(itinerary, dict) else []
+
+    for day_idx, day in enumerate(days):
+        day_date = None
+        if day.get("date"):
+            try:
+                day_date = datetime.strptime(day["date"], "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        if not day_date and trip_start_date:
+            from datetime import timedelta
+            day_date = trip_start_date + timedelta(days=day_idx)
+
+        date_prefix = day_date.strftime("%Y%m%d") if day_date else None
+
+        acts = day.get("activities", [])
+        for act_idx, act in enumerate(acts):
+            title = act.get("name") or act.get("title") or f"Activity {act_idx + 1}"
+            desc = act.get("description", "")
+            loc = act.get("location") or trip.get("destination", "")
+            cost = act.get("cost")
+            if cost:
+                desc += f"\\nEstimated Cost: {cost}"
+            tips = act.get("tips") or act.get("pro_tip")
+            if tips:
+                desc += f"\\nTips: {tips}"
+
+            t_slot = str(act.get("time") or "").lower()
+            if "morning" in t_slot or act_idx == 0:
+                start_h, start_m, end_h, end_m = 9, 0, 12, 0
+            elif "afternoon" in t_slot or act_idx == 1:
+                start_h, start_m, end_h, end_m = 13, 0, 16, 0
+            elif "evening" in t_slot or act_idx >= 2:
+                start_h, start_m, end_h, end_m = 17, 30, 20, 30
+            else:
+                start_h, start_m, end_h, end_m = 10, 0, 13, 0
+
+            uid = f"act-{trip_id}-{day_idx}-{act_idx}@wanderai.com"
+
+            if date_prefix:
+                dt_start = f"{date_prefix}T{start_h:02d}{start_m:02d}00Z"
+                dt_end = f"{date_prefix}T{end_h:02d}{end_m:02d}00Z"
+            else:
+                dt_start = f"{now_str}"
+                dt_end = f"{now_str}"
+
+            lines.extend([
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTAMP:{now_str}",
+                f"DTSTART:{dt_start}",
+                f"DTEND:{dt_end}",
+                f"SUMMARY:{_sanitize(title)}",
+                f"DESCRIPTION:{_sanitize(desc)}",
+                f"LOCATION:{_sanitize(loc)}",
+                "STATUS:CONFIRMED",
+                "END:VEVENT",
+            ])
+
+    # 2. Bookings (Hotels, Flights, Rental Cars)
+    for b_idx, b in enumerate(bookings):
+        b_type = b.get("booking_type") or b.get("type", "booking")
+        b_title = b.get("title", "Reservation")
+        b_prov = b.get("provider", "")
+        b_ref = b.get("reference_number", "")
+        b_start = b.get("start_date")
+        b_end = b.get("end_date") or b_start
+
+        if b_start:
+            try:
+                b_start_clean = b_start.replace("-", "")[:8]
+                b_end_clean = b_end.replace("-", "")[:8] if b_end else b_start_clean
+                uid = f"book-{trip_id}-{b_idx}@wanderai.com"
+                summary = f"[{b_type.upper()}] {b_title}"
+                desc = f"Provider: {b_prov}\\nConfirmation: {b_ref}\\nAmount: {b.get('currency', '')} {b.get('amount', 0)}"
+
+                lines.extend([
+                    "BEGIN:VEVENT",
+                    f"UID:{uid}",
+                    f"DTSTAMP:{now_str}",
+                    f"DTSTART;VALUE=DATE:{b_start_clean}",
+                    f"DTEND;VALUE=DATE:{b_end_clean}",
+                    f"SUMMARY:{_sanitize(summary)}",
+                    f"DESCRIPTION:{_sanitize(desc)}",
+                    f"LOCATION:{_sanitize(trip.get('destination', ''))}",
+                    "STATUS:CONFIRMED",
+                    "END:VEVENT",
+                ])
+            except Exception:
+                pass
+
+    lines.append("END:VCALENDAR")
+    ics_content = "\r\n".join(lines)
+
+    clean_dest = re.sub(r'[^a-zA-Z0-9_-]', '_', trip.get('destination', 'trip'))
+    filename = f"WanderAI_{clean_dest}.ics"
+
+    return Response(
+        ics_content,
+        mimetype="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    )

@@ -1,0 +1,168 @@
+[
+  {
+    "route_id": "97ad9a19-ef22-4224-8d86-2d84f197e08c",
+    "user_id": "usr_b5c6d1f7bd81",
+    "origin": {
+      "latitude": 35.6762,
+      "longitude": 139.6503,
+      "name": "Tokyo Port"
+    },
+    "destination": {
+      "latitude": -33.8688,
+      "longitude": 151.2093,
+      "name": "Sydney Harbour"
+    },
+    "distance_km": 7820,
+    "duration_minutes": 5900,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {
+      "fuel_stations": [],
+      "restaurants": [],
+      "washrooms": [],
+      "rest_areas": [],
+      "charging_stations": []
+    },
+    "created_at": "2026-10-18T05:41:21.426227+00:00",
+    "updated_at": "2026-10-18T05:41:21.426227+00:00",
+    "offline_package_version": 1
+  },
+  {
+    "route_id": "e09215a2-8b79-4401-aef8-0d0c6128efba",
+    "user_id": "usr_09e982b99db8",
+    "origin": {
+      "latitude": 40.7128,
+      "longitude": -74.006,
+      "name": "New York City Port"
+    },
+    "destination": {
+      "latitude": 51.5074,
+      "longitude": -0.1278,
+      "name": "London Gateway"
+    },
+    "distance_km": 5580,
+    "duration_minutes": 4200,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {
+      "fuel_stations": [],
+      "restaurants": [],
+      "washrooms": [],
+      "rest_areas": [],
+      "charging_stations": []
+    },
+    "created_at": "2026-10-18T05:41:04.584080+00:00",
+    "updated_at": "2026-10-18T05:41:04.584080+00:00",
+    "offline_package_version": 1
+  },
+  {
+    "route_id": "352931a2-4629-45f7-8171-cada00150243",
+    "user_id": "usr_a8539ac388a2",
+    "origin": {
+      "latitude": 35.6762,
+      "longitude": 139.6503,
+      "name": "Tokyo Port"
+    },
+    "destination": {
+      "latitude": -33.8688,
+      "longitude": 151.2093,
+      "name": "Sydney Harbour"
+    },
+    "distance_km": 7820,
+    "duration_minutes": 5900,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {
+      "fuel_stations": [],
+      "restaurants": [],
+      "washrooms": [],
+      "rest_areas": [],
+      "charging_stations": []
+    },
+    "created_at": "2026-10-18T05:27:56.013277+00:00",
+    "updated_at": "2026-10-18T05:27:56.013277+00:00",
+    "offline_package_version": 1
+  },
+  {
+    "route_id": "d162ac64-3fa1-4c6d-8fad-c5af71cc7926",
+    "user_id": "usr_16b1fcceb1d3",
+    "origin": {
+      "latitude": 40.7128,
+      "longitude": -74.006,
+      "name": "New York City Port"
+    },
+    "destination": {
+      "latitude": 51.5074,
+      "longitude": -0.1278,
+      "name": "London Gateway"
+    },
+    "distance_km": 5580,
+    "duration_minutes": 4200,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {
+      "fuel_stations": [],
+      "restaurants": [],
+      "washrooms": [],
+      "rest_areas": [],
+      "charging_stations": []
+    },
+    "created_at": "2026-10-18T05:27:39.326980+00:00",
+    "updated_at": "2026-10-18T05:27:39.326980+00:00",
+    "offline_package_version": 1
+  },
+  {
+    "route_id": "066ce86f-ffc4-477f-8f57-24a3928d6593",
+    "user_id": "usr_433d0c2abee7",
+    "origin": {
+      "name": "Tokyo"
+    },
+    "destination": {
+      "name": "Osaka"
+    },
+    "distance_km": 500,
+    "duration_minutes": 350,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {},
+    "created_at": "2026-10-18T05:21:10.550991+00:00",
+    "updated_at": "2026-10-18T05:21:10.550991+00:00",
+    "offline_package_version": 1
+  },
+  {
+    "route_id": "d24c1a0f-4590-4c29-a17a-84c4a9f61c50",
+    "user_id": "usr_29715aae1cd8",
+    "origin": {
+      "name": "Berlin"
+    },
+    "destination": {
+      "name": "Paris"
+    },
+    "distance_km": 1050,
+    "duration_minutes": 600,
+    "route_geometry": {},
+    "google_maps_url": "",
+    "route_summary": "",
+    "risk": {},
+    "recommendation": {},
+    "pois": {},
+    "created_at": "2026-10-18T05:21:09.048087+00:00",
+    "updated_at": "2026-10-18T05:21:09.048087+00:00",
+    "offline_package_version": 1
+  }
+]

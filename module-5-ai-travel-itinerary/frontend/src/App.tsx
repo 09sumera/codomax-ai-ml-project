@@ -9,6 +9,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import CreateTrip from './pages/CreateTrip';
 import Itinerary from './pages/Itinerary';
+import { JoinTrip } from './pages/JoinTrip';
 import CurrencyConverterPage from './pages/CurrencyConverterPage';
 import NotFound from './pages/NotFound';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -29,6 +30,8 @@ function App() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/create-trip" element={<CreateTrip />} />
               <Route path="/itinerary/:tripId" element={<Itinerary />} />
+              <Route path="/trip/:tripId" element={<Itinerary />} />
+              <Route path="/join" element={<JoinTrip />} />
             </Route>
             
             <Route path="*" element={<NotFound />} />

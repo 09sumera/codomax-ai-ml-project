@@ -28,13 +28,17 @@ import {
   Compass,
   AlertTriangle,
   PlusCircle,
+  Car,
+  WifiOff,
+  Download,
 } from 'lucide-react';
 import { tripService } from '../services/tripService';
-import { Trip } from '../types/trip';
+import { Trip, Booking } from '../types/trip';
 import { PlaceDetailsModal } from '../components/PlaceDetailsModal';
 import { BudgetExpenseTracker } from '../components/itinerary/BudgetExpenseTracker';
 import { FlightSearchTab } from '../components/itinerary/FlightSearchTab';
 import { HotelSearchTab } from '../components/itinerary/HotelSearchTab';
+import { VehicleRentalTab } from '../components/itinerary/VehicleRentalTab';
 import { TransportGuideTab } from '../components/itinerary/TransportGuideTab';
 import { BookingsManagerTab } from '../components/itinerary/BookingsManagerTab';
 import { EmergencyEssentialsTab } from '../components/itinerary/EmergencyEssentialsTab';
@@ -42,6 +46,9 @@ import { RouteOptimizationTab } from '../components/itinerary/RouteOptimizationT
 import { ReplanTripTab } from '../components/itinerary/ReplanTripTab';
 import { AICompanionTab } from '../components/itinerary/AICompanionTab';
 import { CurrencyConverterWidget } from '../components/CurrencyConverterWidget';
+import { CollaboratorModal } from '../components/itinerary/CollaboratorModal';
+import { offlineStorage } from '../services/offlineStorage';
+import { useAuth } from '../context/AuthContext';
 import ItineraryLoadingSkeleton from '../components/itinerary/ItineraryLoadingSkeleton';
 import ErrorBoundary from '../components/ErrorBoundary';
 
@@ -56,18 +63,23 @@ type ActiveTab =
   | 'currency'
   | 'flights'
   | 'hotels'
+  | 'rentals'
   | 'transport'
   | 'budget'
   | 'bookings'
   | 'emergency';
 
 const Itinerary: React.FC = () => {
+  const { user } = useAuth();
   const { tripId } = useParams<{ tripId: string }>();
   const navigate = useNavigate();
   const [trip, setTrip] = useState<Trip | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<ActiveTab>('itinerary');
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [showCollaboratorModal, setShowCollaboratorModal] = useState(false);
+  const [showCalendarMenu, setShowCalendarMenu] = useState(false);
 
   // Place Modal
   const [selectedPlace, setSelectedPlace] = useState<any>(null);
@@ -83,19 +95,123 @@ const Itinerary: React.FC = () => {
     booking_status: 'Planning',
   });
   const [savingEdit, setSavingEdit] = useState(false);
+  const [tripBookings, setTripBookings] = useState<Booking[]>([]);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     if (tripId) {
       fetchTrip(tripId);
+      loadTripBookings(tripId);
     }
   }, [tripId]);
+
+  const loadTripBookings = async (id: string) => {
+    try {
+      if (!navigator.onLine) {
+        const cached = await offlineStorage.getCachedBookings(id);
+        if (cached && cached.length > 0) {
+          setTripBookings(cached);
+          return;
+        }
+      }
+      const res = await tripService.getBookings(id);
+      setTripBookings(res.bookings || []);
+      await offlineStorage.cacheBookings(id, res.bookings || []);
+    } catch (err) {
+      const cached = await offlineStorage.getCachedBookings(id);
+      if (cached && cached.length > 0) {
+        setTripBookings(cached);
+      } else {
+        console.warn('Could not load reservations for car rental timeline badge:', err);
+      }
+    }
+  };
+
+  const isCarRentalActiveForDay = (dayDateStr?: string) => {
+    if (!tripBookings || tripBookings.length === 0) return false;
+    const rentalBookings = tripBookings.filter(
+      (b) =>
+        (b.booking_type === 'rental_car' || b.booking_type === 'car_rental') &&
+        (b.status === 'confirmed' || b.status === 'planned')
+    );
+    if (rentalBookings.length === 0) return false;
+
+    if (!dayDateStr) {
+      return rentalBookings.length > 0;
+    }
+
+    return rentalBookings.some((b) => {
+      const start = b.start_date;
+      const end = b.end_date;
+      if (!start && !end) return true;
+      if (start && end) {
+        return dayDateStr >= start && dayDateStr <= end;
+      }
+      if (start && !end) return dayDateStr >= start;
+      return false;
+    });
+  };
+
+  const handleOpenGoogleCalendar = () => {
+    if (!trip) return;
+    const title = encodeURIComponent(trip.title || `Trip to ${trip.destination}`);
+    const details = encodeURIComponent(
+      `WanderAI Itinerary: ${trip.title}\nDestination: ${trip.destination}\nDuration: ${trip.days} days\nBudget: ${trip.currency} ${trip.budget || 'N/A'}`
+    );
+    const location = encodeURIComponent(trip.destination || '');
+
+    let dates = '';
+    if (trip.start_date && trip.end_date) {
+      const s = trip.start_date.replace(/-/g, '');
+      const e = trip.end_date.replace(/-/g, '');
+      dates = `${s}/${e}`;
+    } else {
+      const today = new Date().toISOString().split('T')[0].replace(/-/g, '');
+      dates = `${today}/${today}`;
+    }
+
+    const gcalUrl = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dates}&details=${details}&location=${location}`;
+    window.open(gcalUrl, '_blank');
+  };
 
   const fetchTrip = async (id: string) => {
     try {
       setLoading(true);
       setError('');
+
+      if (!navigator.onLine) {
+        setIsOffline(true);
+        const cached = await offlineStorage.getCachedTrip(id);
+        if (cached) {
+          setTrip(cached);
+          setEditFormData({
+            title: cached.title || '',
+            origin: cached.origin || '',
+            budget: cached.budget || 0,
+            travelers: cached.travelers || 1,
+            booking_status: cached.booking_status || 'Planning',
+          });
+          setLoading(false);
+          return;
+        }
+      }
+
       const data = await tripService.getTrip(id);
       setTrip(data.trip);
+      await offlineStorage.cacheTrip(data.trip);
+
       setEditFormData({
         title: data.trip.title || '',
         origin: data.trip.origin || '',
@@ -104,10 +220,22 @@ const Itinerary: React.FC = () => {
         booking_status: data.trip.booking_status || 'Planning',
       });
     } catch (err: any) {
-      setError(
-        err?.response?.data?.message ||
-          "Failed to load itinerary. It may have been deleted or doesn't exist."
-      );
+      const cached = await offlineStorage.getCachedTrip(id);
+      if (cached) {
+        setTrip(cached);
+        setEditFormData({
+          title: cached.title || '',
+          origin: cached.origin || '',
+          budget: cached.budget || 0,
+          travelers: cached.travelers || 1,
+          booking_status: cached.booking_status || 'Planning',
+        });
+      } else {
+        setError(
+          err?.response?.data?.message ||
+            "Failed to load itinerary. It may have been deleted or doesn't exist."
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -263,6 +391,16 @@ const Itinerary: React.FC = () => {
   return (
     <ErrorBoundary fallbackTitle="Itinerary Screen Error">
       <div className="flex-grow flex flex-col bg-background pb-24">
+        {/* Offline Mode Banner */}
+        {isOffline && (
+          <div className="bg-amber-500/20 border-b border-amber-500/40 px-4 py-2 text-center text-amber-300 text-xs font-semibold flex items-center justify-center gap-2">
+            <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              Offline Mode (Cached Data) — Viewing cached itinerary. Expense updates will sync automatically when back online.
+            </span>
+          </div>
+        )}
+
       {/* Hero Header Area */}
       <div className="relative h-72 md:h-96 w-full overflow-hidden bg-neutral-900">
         <img
@@ -287,6 +425,53 @@ const Itinerary: React.FC = () => {
 
           {/* Quick Feature Shortcut Pills */}
           <div className="flex items-center gap-2 overflow-x-auto scrollbar-none py-1">
+            {/* Collaborate & Invite Button */}
+            <button
+              onClick={() => setShowCollaboratorModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition-all shadow-md shadow-emerald-500/25 shrink-0"
+              title="Group trip collaborators & invite code"
+            >
+              <Users className="w-3.5 h-3.5 text-slate-950 stroke-[2.5]" />
+              <span>Collaborate</span>
+            </button>
+
+            {/* Calendar Export Dropdown */}
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setShowCalendarMenu((prev) => !prev)}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-black/75 hover:bg-black/90 text-white rounded-xl backdrop-blur-md text-xs font-semibold transition-all shadow-lg border border-white/20"
+                title="Sync itinerary with personal calendar"
+              >
+                <CalendarCheck className="w-3.5 h-3.5 text-primary" />
+                <span>Calendar Sync</span>
+              </button>
+
+              {showCalendarMenu && (
+                <div className="absolute right-0 mt-2 w-52 bg-surface/95 backdrop-blur-md border border-border rounded-xl shadow-2xl p-1 z-50 text-xs">
+                  <button
+                    onClick={async () => {
+                      setShowCalendarMenu(false);
+                      await tripService.downloadCalendarIcs(trip.id, trip.title);
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-text hover:bg-background rounded-lg transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Download .ics Calendar</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowCalendarMenu(false);
+                      handleOpenGoogleCalendar();
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-text hover:bg-background rounded-lg transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5 text-primary" />
+                    <span>Add to Google Calendar</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
             <button
               onClick={() => setActiveTab('optimize')}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-black/60 hover:bg-primary text-white rounded-xl backdrop-blur-md text-xs font-semibold transition-all shadow-lg border border-white/10"
@@ -390,6 +575,7 @@ const Itinerary: React.FC = () => {
               { id: 'currency', label: 'Currency & FX', icon: Coins },
               { id: 'flights', label: 'Flights', icon: Plane },
               { id: 'hotels', label: 'Hotels & Stays', icon: Hotel },
+              { id: 'rentals', label: '🚗 Vehicle Rentals', icon: Car },
               { id: 'transport', label: 'Routes & Transit', icon: Navigation },
               { id: 'budget', label: 'Budget & Expenses', icon: Wallet },
               { id: 'bookings', label: 'Reservations', icon: CalendarCheck },
@@ -397,13 +583,16 @@ const Itinerary: React.FC = () => {
             ].map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
+              const isEmeraldPill = tab.id === 'rentals' || tab.id === 'hotels';
               return (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as ActiveTab)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold whitespace-nowrap transition-all ${
                     isActive
-                      ? 'bg-primary text-background shadow-md'
+                      ? isEmeraldPill
+                        ? 'bg-emerald-500 text-slate-950 font-bold shadow-md shadow-emerald-500/20'
+                        : 'bg-primary text-background shadow-md'
                       : 'text-muted hover:text-text hover:bg-surface-alt'
                   }`}
                 >
@@ -447,8 +636,16 @@ const Itinerary: React.FC = () => {
                         <div className="w-12 h-12 bg-surface border-2 border-primary text-primary rounded-2xl flex items-center justify-center font-bold font-serif shrink-0 z-10 shadow-md">
                           D{dayNum}
                         </div>
-                        <div>
-                          <h3 className="text-xl font-bold text-text">{dayTitle}</h3>
+                        <div className="flex-grow">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <h3 className="text-xl font-bold text-text">{dayTitle}</h3>
+                            {isCarRentalActiveForDay(day.date) && (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm">
+                                <Car className="w-3.5 h-3.5" />
+                                <span>🚗 Car Rental Active</span>
+                              </span>
+                            )}
+                          </div>
                           {day.date && <p className="text-xs text-primary font-medium">{day.date}</p>}
                         </div>
                       </div>
@@ -617,6 +814,19 @@ const Itinerary: React.FC = () => {
           />
         )}
 
+        {/* TAB: CAR & VEHICLE RENTALS */}
+        {activeTab === 'rentals' && (
+          <VehicleRentalTab
+            trip={trip}
+            onBookingAdded={() => {
+              if (tripId) {
+                fetchTrip(tripId);
+                loadTripBookings(tripId);
+              }
+            }}
+          />
+        )}
+
         {/* TAB 4: TRANSPORT & ROUTES */}
         {activeTab === 'transport' && <TransportGuideTab trip={trip} />}
 
@@ -781,6 +991,19 @@ const Itinerary: React.FC = () => {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Collaborator Management Modal */}
+      {showCollaboratorModal && trip && (
+        <CollaboratorModal
+          trip={trip}
+          isOpen={showCollaboratorModal}
+          onClose={() => setShowCollaboratorModal(false)}
+          onTripUpdated={() => {
+            if (tripId) fetchTrip(tripId);
+          }}
+          currentUserId={user?.id}
+        />
       )}
     </div>
   </ErrorBoundary>

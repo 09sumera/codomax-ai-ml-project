@@ -1,6 +1,8 @@
-"""Trip data operations (collection: trips). Every query is scoped to the owner."""
+"""Trip data operations (collection: trips). Every query supports owner and collaborators."""
 
 from datetime import datetime, timezone
+import secrets
+import string
 from models import get_db, to_object_id
 from services.image_service import get_destination_image
 
@@ -11,6 +13,14 @@ def _trips():
 
 def ensure_indexes():
     _trips().create_index([("user_id", 1), ("created_at", -1)])
+    _trips().create_index([("collaborators.user_id", 1)])
+    _trips().create_index("invite_code")
+
+
+def generate_invite_code(length: int = 6) -> str:
+    """Generate a random 6-character uppercase alphanumeric code."""
+    clean_chars = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    return "".join(secrets.choice(clean_chars) for _ in range(length))
 
 
 def serialize_trip(trip: dict, include_itinerary: bool = True) -> dict:
@@ -28,9 +38,34 @@ def serialize_trip(trip: dict, include_itinerary: bool = True) -> dict:
             if isinstance(cost_obj, dict):
                 estimated_total = cost_obj.get("amount")
 
+    owner_id_str = str(trip.get("owner_id") or trip.get("user_id") or "")
+    invite_code = trip.get("invite_code")
+    if not invite_code and "_id" in trip:
+        invite_code = generate_invite_code()
+        try:
+            _trips().update_one({"_id": trip["_id"]}, {"$set": {"invite_code": invite_code}})
+        except Exception:
+            pass
+
+    collaborators_raw = trip.get("collaborators", [])
+    serialized_collabs = []
+    for c in collaborators_raw:
+        c_uid = str(c.get("user_id") or "")
+        joined = c.get("joined_at")
+        serialized_collabs.append({
+            "user_id": c_uid,
+            "name": c.get("name", "Collaborator"),
+            "email": c.get("email", ""),
+            "role": c.get("role", "editor"),
+            "joined_at": joined.isoformat() if isinstance(joined, datetime) else joined,
+        })
+
     data = {
         "id": str(trip["_id"]),
-        "user_id": str(trip["user_id"]),
+        "user_id": owner_id_str,
+        "owner_id": owner_id_str,
+        "collaborators": serialized_collabs,
+        "invite_code": invite_code,
         "title": trip.get("title", ""),
         "destination": destination,
         "origin": trip.get("origin", ""),
@@ -70,9 +105,14 @@ def create_trip(user_id: str, trip_data: dict) -> dict:
     """Save a trip for a user and return its serialized form."""
     destination = trip_data.get("destination", "")
     image_url = trip_data.get("image_url") or get_destination_image(destination)
+    owner_oid = to_object_id(user_id)
+    invite_code = generate_invite_code()
 
     document = {
-        "user_id": to_object_id(user_id),
+        "user_id": owner_oid,
+        "owner_id": owner_oid,
+        "collaborators": [],
+        "invite_code": invite_code,
         "title": trip_data.get("title"),
         "destination": destination,
         "origin": trip_data.get("origin", ""),
@@ -99,11 +139,18 @@ def create_trip(user_id: str, trip_data: dict) -> dict:
 
 
 def get_trips_by_user(user_id: str) -> list:
-    """Full trip objects including complete itinerary."""
+    """Full trip objects for trips owned by or shared with the user."""
     owner = to_object_id(user_id)
     if owner is None:
         return []
-    cursor = _trips().find({"user_id": owner}).sort("created_at", -1)
+    query = {
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators.user_id": owner},
+        ]
+    }
+    cursor = _trips().find(query).sort("created_at", -1)
     return [serialize_trip(trip, include_itinerary=True) for trip in cursor]
 
 
@@ -112,30 +159,54 @@ def get_trip_summaries_by_user(user_id: str) -> list:
     owner = to_object_id(user_id)
     if owner is None:
         return []
-    # Project out the massive days array
     projection = {
         "itinerary.days": 0
     }
-    cursor = _trips().find({"user_id": owner}, projection).sort("created_at", -1)
+    query = {
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators.user_id": owner},
+        ]
+    }
+    cursor = _trips().find(query, projection).sort("created_at", -1)
     return [serialize_trip(trip, include_itinerary=False) for trip in cursor]
 
 
 def get_trip_by_id(user_id: str, trip_id: str):
-    """Return the trip only if it belongs to the user; otherwise None."""
+    """Return the trip if user is the owner or a collaborator; otherwise None."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None:
         return None
-    trip = _trips().find_one({"_id": oid, "user_id": owner})
+    query = {
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators.user_id": owner},
+        ]
+    }
+    trip = _trips().find_one(query)
     return serialize_trip(trip, include_itinerary=True) if trip else None
 
 
 def update_trip(user_id: str, trip_id: str, updates: dict):
-    """Update allowed fields of a trip belonging to the user."""
+    """Update allowed fields of a trip (if user is owner or editor)."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None:
         return None
     
-    # Filter safe mutable fields
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators": {"$elemMatch": {"user_id": owner, "role": "editor"}}},
+        ]
+    })
+    if not trip:
+        return None
+
     allowed_fields = {
         "title", "origin", "destination", "budget", "currency", 
         "start_date", "end_date", "travelers", "days", "interests",
@@ -145,23 +216,28 @@ def update_trip(user_id: str, trip_id: str, updates: dict):
     }
     clean_updates = {k: v for k, v in updates.items() if k in allowed_fields}
     
-    # If destination changed, update image_url if not explicitly provided
     if "destination" in clean_updates and "image_url" not in clean_updates:
         clean_updates["image_url"] = get_destination_image(clean_updates["destination"])
         
     if clean_updates:
         clean_updates["updated_at"] = datetime.now(timezone.utc)
-        _trips().update_one({"_id": oid, "user_id": owner}, {"$set": clean_updates})
+        _trips().update_one({"_id": oid}, {"$set": clean_updates})
         
     return get_trip_by_id(user_id, trip_id)
 
 
 def push_itinerary_revision(user_id: str, trip_id: str, new_itinerary: dict, change_reason: str = "Optimization") -> dict | None:
-    """Store current itinerary in history for undo capability and apply new itinerary."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None:
         return None
-    trip = _trips().find_one({"_id": oid, "user_id": owner})
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators": {"$elemMatch": {"user_id": owner, "role": "editor"}}},
+        ]
+    })
     if not trip:
         return None
         
@@ -172,12 +248,11 @@ def push_itinerary_revision(user_id: str, trip_id: str, new_itinerary: dict, cha
         "reason": change_reason,
         "saved_at": datetime.now(timezone.utc).isoformat()
     })
-    # Keep up to 10 historical snapshots
     if len(history) > 10:
         history = history[-10:]
 
     _trips().update_one(
-        {"_id": oid, "user_id": owner},
+        {"_id": oid},
         {
             "$set": {
                 "itinerary": new_itinerary,
@@ -190,11 +265,17 @@ def push_itinerary_revision(user_id: str, trip_id: str, new_itinerary: dict, cha
 
 
 def undo_itinerary_revision(user_id: str, trip_id: str) -> dict | None:
-    """Revert itinerary to the most recent historical snapshot."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None:
         return None
-    trip = _trips().find_one({"_id": oid, "user_id": owner})
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators": {"$elemMatch": {"user_id": owner, "role": "editor"}}},
+        ]
+    })
     if not trip:
         return None
         
@@ -206,7 +287,7 @@ def undo_itinerary_revision(user_id: str, trip_id: str) -> dict | None:
     restored_itinerary = last_revision.get("itinerary", {})
 
     _trips().update_one(
-        {"_id": oid, "user_id": owner},
+        {"_id": oid},
         {
             "$set": {
                 "itinerary": restored_itinerary,
@@ -219,14 +300,22 @@ def undo_itinerary_revision(user_id: str, trip_id: str) -> dict | None:
 
 
 def toggle_activity_completion(user_id: str, trip_id: str, activity_name: str, completed: bool = True) -> dict | None:
-    """Track completed activities so replanning preserves them."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None or not activity_name:
         return None
 
+    query = {
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators.user_id": owner},
+        ]
+    }
+
     if completed:
         _trips().update_one(
-            {"_id": oid, "user_id": owner},
+            query,
             {
                 "$addToSet": {"completed_activities": activity_name},
                 "$set": {"updated_at": datetime.now(timezone.utc)}
@@ -234,7 +323,7 @@ def toggle_activity_completion(user_id: str, trip_id: str, activity_name: str, c
         )
     else:
         _trips().update_one(
-            {"_id": oid, "user_id": owner},
+            query,
             {
                 "$pull": {"completed_activities": activity_name},
                 "$set": {"updated_at": datetime.now(timezone.utc)}
@@ -244,12 +333,18 @@ def toggle_activity_completion(user_id: str, trip_id: str, activity_name: str, c
 
 
 def set_trip_display_currency(user_id: str, trip_id: str, currency_code: str) -> dict | None:
-    """Update preferred display currency without altering underlying expense records."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None or not currency_code:
         return None
     _trips().update_one(
-        {"_id": oid, "user_id": owner},
+        {
+            "_id": oid,
+            "$or": [
+                {"user_id": owner},
+                {"owner_id": owner},
+                {"collaborators.user_id": owner},
+            ]
+        },
         {
             "$set": {
                 "display_currency": currency_code.upper().strip(),
@@ -261,8 +356,147 @@ def set_trip_display_currency(user_id: str, trip_id: str, currency_code: str) ->
 
 
 def delete_trip(user_id: str, trip_id: str) -> bool:
-    """Delete the trip only if it belongs to the user. Returns True if deleted."""
+    """Delete the trip only if it belongs to the owner."""
     owner, oid = to_object_id(user_id), to_object_id(trip_id)
     if owner is None or oid is None:
         return False
-    return _trips().delete_one({"_id": oid, "user_id": owner}).deleted_count == 1
+    return _trips().delete_one({
+        "_id": oid,
+        "$or": [{"user_id": owner}, {"owner_id": owner}]
+    }).deleted_count == 1
+
+
+# --- Collaboration Features ---
+
+def generate_trip_invite_code(user_id: str, trip_id: str) -> str | None:
+    """Generate and save a fresh 6-char alphanumeric invite code for the trip."""
+    owner, oid = to_object_id(user_id), to_object_id(trip_id)
+    if owner is None or oid is None:
+        return None
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators": {"$elemMatch": {"user_id": owner, "role": "editor"}}},
+        ]
+    })
+    if not trip:
+        return None
+
+    code = generate_invite_code()
+    _trips().update_one({"_id": oid}, {"$set": {"invite_code": code}})
+    return code
+
+
+def join_trip_by_code(user_id: str, invite_code: str):
+    """Join a trip using its 6-character alphanumeric invite code."""
+    from models import user_model
+    clean_code = (invite_code or "").strip().upper()
+    if not clean_code or len(clean_code) < 4:
+        return None, "Invalid invite code format."
+
+    trip = _trips().find_one({"invite_code": clean_code})
+    if not trip:
+        return None, "Trip not found with the specified invite code."
+
+    uid = to_object_id(user_id)
+    if uid is None:
+        return None, "Invalid user identifier."
+
+    owner_id = trip.get("owner_id") or trip.get("user_id")
+    if owner_id == uid:
+        return serialize_trip(trip), "You are already the owner of this trip."
+
+    # Check if already a collaborator
+    existing_collabs = trip.get("collaborators", [])
+    for c in existing_collabs:
+        if c.get("user_id") == uid:
+            return serialize_trip(trip), "You are already a collaborator on this trip."
+
+    # Fetch joining user's profile
+    user_doc = user_model.find_user_by_id(user_id)
+    user_name = user_doc.get("name", "Fellow Traveler") if user_doc else "Fellow Traveler"
+    user_email = user_doc.get("email", "") if user_doc else ""
+
+    new_collaborator = {
+        "user_id": uid,
+        "name": user_name,
+        "email": user_email,
+        "role": "editor",
+        "joined_at": datetime.now(timezone.utc),
+    }
+
+    _trips().update_one(
+        {"_id": trip["_id"]},
+        {"$push": {"collaborators": new_collaborator}}
+    )
+
+    updated_trip = _trips().find_one({"_id": trip["_id"]})
+    return serialize_trip(updated_trip), "Successfully joined the trip!"
+
+
+def get_trip_collaborators(user_id: str, trip_id: str) -> dict | None:
+    """Get the owner and list of collaborators for a trip."""
+    from models import user_model
+    owner, oid = to_object_id(user_id), to_object_id(trip_id)
+    if owner is None or oid is None:
+        return None
+
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [
+            {"user_id": owner},
+            {"owner_id": owner},
+            {"collaborators.user_id": owner},
+        ]
+    })
+    if not trip:
+        return None
+
+    owner_uid = trip.get("owner_id") or trip.get("user_id")
+    owner_user = user_model.find_user_by_id(str(owner_uid)) if owner_uid else None
+    owner_data = {
+        "user_id": str(owner_uid),
+        "name": owner_user.get("name", "Trip Owner") if owner_user else "Trip Owner",
+        "email": owner_user.get("email", "") if owner_user else "",
+        "role": "owner",
+    }
+
+    collaborators = []
+    for c in trip.get("collaborators", []):
+        c_joined = c.get("joined_at")
+        collaborators.append({
+            "user_id": str(c.get("user_id")),
+            "name": c.get("name", "Collaborator"),
+            "email": c.get("email", ""),
+            "role": c.get("role", "editor"),
+            "joined_at": c_joined.isoformat() if isinstance(c_joined, datetime) else c_joined,
+        })
+
+    return {
+        "owner": owner_data,
+        "collaborators": collaborators,
+        "invite_code": trip.get("invite_code") or "",
+        "total_members": 1 + len(collaborators),
+    }
+
+
+def remove_trip_collaborator(owner_id: str, trip_id: str, target_user_id: str) -> bool:
+    """Remove a collaborator from a trip (owner only)."""
+    owner, oid, target = to_object_id(owner_id), to_object_id(trip_id), to_object_id(target_user_id)
+    if owner is None or oid is None or target is None:
+        return False
+
+    trip = _trips().find_one({
+        "_id": oid,
+        "$or": [{"user_id": owner}, {"owner_id": owner}]
+    })
+    if not trip:
+        return False
+
+    res = _trips().update_one(
+        {"_id": oid},
+        {"$pull": {"collaborators": {"user_id": target}}}
+    )
+    return res.modified_count > 0

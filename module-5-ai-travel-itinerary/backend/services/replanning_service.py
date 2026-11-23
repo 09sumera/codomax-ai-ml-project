@@ -207,6 +207,23 @@ def replan_itinerary(
     # 1. Preserve completed activities
     completed_set = {str(act).lower().strip() for act in completed_activity_ids}
 
+    # Recognize confirmed car rental reservations to leverage private road mobility
+    try:
+        from models import booking_model
+        u_id = str(trip.get("user_id") or "")
+        t_id = str(trip.get("id") or trip.get("_id") or "")
+        if u_id and t_id:
+            b_list = booking_model.get_bookings_by_trip(u_id, t_id)
+            r_b = [b for b in b_list if str(b.get("booking_type", "")).lower() in ("rental_car", "car_rental")]
+            if r_b:
+                b0 = r_b[0]
+                car_name = b0.get("details", {}).get("vehicle_name") or b0.get("title", "Rental Vehicle")
+                changes_explanation.append(
+                    f"Preserved active vehicle rental ({car_name}) schedule and leveraged private road mobility."
+                )
+    except Exception:
+        pass
+
     live_weather_info = None
 
     # 2. Apply scenario-specific adaptation

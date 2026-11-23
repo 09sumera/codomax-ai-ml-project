@@ -208,6 +208,89 @@ def answer_trip_query(user_id: str, trip_or_id, user_message: str) -> dict:
                     "intent": "next_stop",
                 }
 
+    # 3b. Deterministic Car & Vehicle Rental Answers
+    rental_bookings = [
+        b for b in bookings
+        if str(b.get("booking_type", "")).lower() in ("rental_car", "car_rental")
+        or "rental" in str(b.get("title", "")).lower()
+        or b.get("details", {}).get("vehicle_name")
+    ]
+
+    # Pickup question: "Where do I pick up the rental car?"
+    if any(q in msg_lower for q in [
+        "pick up the rental car", "pickup the rental car", "where do i pick up",
+        "where is the rental car", "pick up location", "pickup location",
+        "where to collect the car", "collect the car", "car pickup", "vehicle pickup"
+    ]):
+        if rental_bookings:
+            b = rental_bookings[0]
+            details = b.get("details", {})
+            car_title = details.get("vehicle_name") or b.get("title", "Rental Vehicle")
+            provider = b.get("provider", "Direct Rental")
+            pickup_loc = details.get("pickup_location") or f"{destination} Main Transportation Hub"
+            start_date = b.get("start_date") or details.get("pickup_date") or "your scheduled arrival date"
+            ref_no = b.get("reference_number")
+
+            ref_line = f"\n- **Confirmation Number**: `{ref_no}`" if ref_no else ""
+            return {
+                "response": f"🚗 **Rental Car Pick-Up Information**:\n"
+                            f"- **Vehicle**: **{car_title}**\n"
+                            f"- **Rental Provider**: {provider}\n"
+                            f"- **Pick-Up Location**: 📍 **{pickup_loc}**\n"
+                            f"- **Pick-Up Date**: {start_date}{ref_line}\n\n"
+                            f"💡 *Pro-Tip: Please bring your valid driver's license, passport or photo ID, and the credit card used for the security deposit.*",
+                "is_deterministic": True,
+                "intent": "rental_pickup",
+            }
+        else:
+            return {
+                "response": f"You haven't reserved a rental car for {destination} yet. You can browse and pre-book vehicles anytime under the **'🚗 Vehicle Rentals'** tab.",
+                "is_deterministic": True,
+                "intent": "rental_pickup_empty",
+            }
+
+    # Drop-off deadline question: "When is the vehicle drop-off deadline?"
+    if any(q in msg_lower for q in [
+        "drop-off deadline", "dropoff deadline", "drop off deadline", "vehicle drop-off",
+        "when is the vehicle drop", "return the rental car", "when to return the car",
+        "car return deadline", "vehicle return", "return deadline"
+    ]):
+        if rental_bookings:
+            b = rental_bookings[0]
+            details = b.get("details", {})
+            car_title = details.get("vehicle_name") or b.get("title", "Rental Vehicle")
+            provider = b.get("provider", "Direct Rental")
+            dropoff_loc = details.get("dropoff_location") or details.get("pickup_location") or f"{destination} Airport Hub"
+            end_date = b.get("end_date") or details.get("dropoff_date") or "the final day of your rental reservation"
+
+            return {
+                "response": f"🚗 **Rental Vehicle Drop-Off Details**:\n"
+                            f"- **Vehicle**: **{car_title}** ({provider})\n"
+                            f"- **Drop-Off Deadline**: ⏰ **{end_date}** (before standard return cutoff time)\n"
+                            f"- **Return Station**: 📍 **{dropoff_loc}**\n\n"
+                            f"💡 *Pro-Tip: Allow 20-30 minutes for vehicle walk-around inspection and ensure the fuel tank matches your rental policy (Full-to-Full) to avoid extra fees.*",
+                "is_deterministic": True,
+                "intent": "rental_dropoff",
+            }
+        else:
+            return {
+                "response": f"There are no active rental vehicle reservations on file for this trip. You can find available cars under the **'🚗 Vehicle Rentals'** tab.",
+                "is_deterministic": True,
+                "intent": "rental_dropoff_empty",
+            }
+
+    # General rental car inquiry
+    if any(q in msg_lower for q in ["my rental car", "rental car details", "booked vehicle", "hired car"]):
+        if rental_bookings:
+            lines = ["🚗 **Your Booked Vehicle Rentals**:"]
+            for b in rental_bookings:
+                d = b.get("details", {})
+                title = d.get("vehicle_name") or b.get("title")
+                prov = b.get("provider", "Direct")
+                dates = f"{b.get('start_date', 'N/A')} → {b.get('end_date', 'N/A')}"
+                lines.append(f"- **{title}** ({prov}) | Dates: {dates} | Status: *{b.get('status', 'confirmed').capitalize()}*")
+            return {"response": "\n".join(lines), "is_deterministic": True, "intent": "rental_list"}
+
     # Day schedule query: e.g. "schedule for day 1"
     day_match = re.search(r"day\s*(\d+)", msg_lower)
     if day_match and any(k in msg_lower for k in ["schedule", "plan", "activities", "what am i doing"]):
@@ -247,6 +330,12 @@ def answer_trip_query(user_id: str, trip_or_id, user_message: str) -> dict:
         days_summary.append(f"Day {d.get('day_number', 1)}: {acts_str}")
     itinerary_text = " | ".join(days_summary)
 
+    rentals_summary = [
+        f"{b.get('title')} (Pick-up: {b.get('details', {}).get('pickup_location', 'Hub')}, Return: {b.get('details', {}).get('dropoff_location', 'Hub')}, Dates: {b.get('start_date')} to {b.get('end_date')})"
+        for b in rental_bookings
+    ]
+    rentals_text = "; ".join(rentals_summary) if rentals_summary else "No vehicle rentals booked yet"
+
     prompt = (
         f"You are WanderAI Travel Companion, an intelligent concierge assisting a traveler in {destination}.\n\n"
         f"TRIP CONTEXT:\n"
@@ -255,6 +344,7 @@ def answer_trip_query(user_id: str, trip_or_id, user_message: str) -> dict:
         f"- Travelers: {trip.get('travelers', 1)}\n"
         f"- Budget: {currency} {total_budget:,.2f} (Paid so far: {currency} {analytics['actual_paid_expenses']:,.2f}, Remaining: {currency} {analytics['remaining_budget']:,.2f})\n"
         f"- Saved Bookings: {len(bookings)} bookings saved\n"
+        f"- Booked Rental Vehicles: {rentals_text}\n"
         f"- Current Itinerary: {itinerary_text}\n"
         f"- Traveler Preferences: Transport={trip.get('transport_preference')}, Food={trip.get('food_preference')}, Accessibility={trip.get('accessibility_requirements')}\n\n"
         f"USER QUESTION: {msg_clean}\n\n"

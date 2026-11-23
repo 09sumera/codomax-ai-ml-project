@@ -6,10 +6,13 @@ import {
   BudgetAnalytics,
   FlightOffer,
   HotelOffer,
+  RentalOffer,
   TransportRouteOption,
   LocalTransportGuide,
   EmergencyServices,
   Booking,
+  Collaborator,
+  SettlementData,
   RouteOptimizationProposal,
   ReplanningProposal,
   CompanionMessage,
@@ -324,5 +327,82 @@ export const tripService = {
       params: { destination },
     });
     return response.data.data;
+  },
+
+  // Car & Vehicle Rentals
+  async searchRentals(params: {
+    location: string;
+    pickup_date?: string;
+    dropoff_date?: string;
+    passengers?: number;
+    category?: string;
+    transmission?: string;
+    currency?: string;
+  }): Promise<{ rentals: RentalOffer[]; count: number; days: number; is_demo: boolean }> {
+    const response = await api.get('/rentals/search', { params });
+    return response.data.data;
+  },
+
+  async bookRental(
+    tripId: string,
+    data: any
+  ): Promise<{ booking: Booking; expense: Expense; analytics: BudgetAnalytics }> {
+    const response = await api.post(`/trips/${tripId}/rentals/book`, data);
+    return response.data.data;
+  },
+
+  // Group Collaboration
+  async getCollaborators(tripId: string): Promise<{
+    owner: any;
+    collaborators: Collaborator[];
+    invite_code: string;
+    total_members: number;
+  }> {
+    const response = await api.get(`/trips/${tripId}/collaborators`);
+    return response.data.data;
+  },
+
+  async createInvite(tripId: string): Promise<{ invite_code: string; share_url: string }> {
+    const response = await api.post(`/trips/${tripId}/collaborators/invite`);
+    return response.data.data;
+  },
+
+  async joinTrip(inviteCode: string): Promise<{ trip: Trip; message: string }> {
+    const response = await api.post('/trips/join', { invite_code: inviteCode });
+    return response.data.data;
+  },
+
+  async removeCollaborator(tripId: string, targetUserId: string): Promise<void> {
+    await api.delete(`/trips/${tripId}/collaborators/${targetUserId}`);
+  },
+
+  // Splitwise & Debt Settlement
+  async getSettlement(tripId: string): Promise<SettlementData> {
+    const response = await api.get(`/trips/${tripId}/expenses/settlement`);
+    return response.data.data;
+  },
+
+  async settleDebt(
+    tripId: string,
+    data: { from: string; to: string; amount: number; currency?: string }
+  ): Promise<{ expense: Expense; settlement: SettlementData; analytics: BudgetAnalytics }> {
+    const response = await api.post(`/trips/${tripId}/expenses/settle`, data);
+    return response.data.data;
+  },
+
+  // Calendar Export
+  async downloadCalendarIcs(tripId: string, title?: string): Promise<void> {
+    const response = await api.get(`/trips/${tripId}/export/ics`, {
+      responseType: 'blob',
+    });
+    const blob = new Blob([response.data], { type: 'text/calendar;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${(title || 'trip').replace(/\s+/g, '_')}.ics`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
   },
 };

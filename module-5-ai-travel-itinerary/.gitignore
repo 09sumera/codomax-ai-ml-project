@@ -1,15 +1,12 @@
-node_modules/
+# Environments & Keys
+.env
+.env.local
 __pycache__/
 *.pyc
 venv/
-env/
-.env
-.env.local
-.env.*.local
+.venv/
+
+# Node dependencies & builds
+node_modules/
 dist/
 build/
-.DS_Store
-scratch/
-.pytest_cache/
-backend/data/
-

@@ -1,76 +1,94 @@
+"""Authentication endpoints: /api/auth/*"""
+
+import re
+
 from flask import Blueprint, request
-from backend.services.user_service import UserService
-from backend.utils.auth_middleware import token_required
-from backend.utils.response import success_response, error_response
 
-auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
+from models.user_model import (
+    DuplicateEmailError,
+    create_user,
+    find_user_by_email,
+    find_user_by_id,
+    serialize_user,
+    verify_password,
+)
+from utils import error_response, success_response
+from utils.auth import generate_token, get_current_user_id, token_required
 
-@auth_bp.route('/signup', methods=['POST'], strict_slashes=False)
-def signup():
+auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
+
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+
+def _json_body():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else None
+
+
+@auth_bp.route("/register", methods=["POST"])
+def register():
+    data = _json_body()
+    if data is None:
+        return error_response("Request body must be valid JSON.", 400)
+
+    name = data.get("name")
+    email = data.get("email")
+    password = data.get("password")
+
+    errors = {}
+    if not isinstance(name, str) or not (2 <= len(name.strip()) <= 80):
+        errors["name"] = "Name is required (2-80 characters)."
+    if not isinstance(email, str) or len(email.strip()) > 254 or not EMAIL_REGEX.match(email.strip()):
+        errors["email"] = "A valid email address is required."
+    if (
+        not isinstance(password, str)
+        or not (8 <= len(password) <= 128)
+        or not re.search(r"[A-Za-z]", password)
+        or not re.search(r"\d", password)
+    ):
+        errors["password"] = "Password must be 8-128 characters and include a letter and a number."
+    if errors:
+        return error_response("Validation failed.", 400, errors)
+
     try:
-        data = request.json or {}
-        name = data.get('name')
-        email = data.get('email')
-        password = data.get('password')
-        role = data.get('role', 'Fleet Dispatcher')
-        company = data.get('company', 'Global Logistics Corp')
+        user = create_user(name, email, password)
+    except DuplicateEmailError:
+        return error_response("An account with this email already exists.", 409)
 
-        result = UserService.register_user(
-            name=name,
-            email=email,
-            password=password,
-            role=role,
-            company=company
-        )
-        result["data"] = {"user": result["user"], "token": result["token"]}
-        return success_response(data=result, message="Account registered successfully", status_code=201)
-    except ValueError as val_err:
-        return error_response('VALIDATION_ERROR', str(val_err), status_code=400)
-    except Exception as e:
-        return error_response('REGISTRATION_FAILED', f"Failed to register account: {str(e)}", status_code=500)
+    token = generate_token(str(user["_id"]))
+    return success_response(
+        "Registration successful.",
+        {"user": serialize_user(user), "token": token},
+        201,
+    )
 
-@auth_bp.route('/login', methods=['POST'], strict_slashes=False)
+
+@auth_bp.route("/login", methods=["POST"])
 def login():
-    try:
-        data = request.json or {}
-        email = data.get('email')
-        password = data.get('password')
+    data = _json_body()
+    if data is None:
+        return error_response("Request body must be valid JSON.", 400)
 
-        result = UserService.login_user(email=email, password=password)
-        result["data"] = {"user": result["user"], "token": result["token"]}
-        return success_response(data=result, message="Logged in successfully")
-    except ValueError as val_err:
-        return error_response('AUTH_ERROR', str(val_err), status_code=401)
-    except Exception as e:
-        return error_response('LOGIN_FAILED', f"Login failed: {str(e)}", status_code=500)
+    email = data.get("email")
+    password = data.get("password")
+    if not isinstance(email, str) or not email.strip() or not isinstance(password, str) or not password:
+        return error_response("Email and password are required.", 400)
 
-@auth_bp.route('/me', methods=['GET'], strict_slashes=False)
+    user = find_user_by_email(email)
+    if user is None or not verify_password(user, password):
+        return error_response("Invalid email or password.", 401)
+
+    token = generate_token(str(user["_id"]))
+    return success_response(
+        "Login successful.",
+        {"user": serialize_user(user), "token": token},
+    )
+
+
+@auth_bp.route("/me", methods=["GET"])
 @token_required
-def get_current_user_profile():
-    try:
-        user_id = request.current_user.get('user_id')
-        user_profile = UserService.get_user_by_id(user_id)
-        if not user_profile:
-            # Fallback to payload data
-            user_profile = {
-                "user_id": user_id,
-                "name": request.current_user.get('name'),
-                "email": request.current_user.get('email'),
-                "role": request.current_user.get('role'),
-                "company": request.current_user.get('company')
-            }
-        return success_response(data={"user": user_profile})
-    except Exception as e:
-        return error_response('FETCH_PROFILE_FAILED', str(e), status_code=500)
-
-@auth_bp.route('/demo', methods=['GET'], strict_slashes=False)
-def get_demo_account():
-    """Returns the pre-configured demo fleet credentials and ensures demo account exists."""
-    UserService.seed_demo_user()
-    return success_response(data={
-        "email": "demo@routeshield.ai",
-        "password": "routeshield123",
-        "name": "Alex Mercer",
-        "role": "Chief Logistics Controller",
-        "company": "Pacific-Atlantic Cargo Line"
-    }, message="Demo credentials ready")
+def me():
+    user = find_user_by_id(get_current_user_id())
+    if user is None:
+        return error_response("User no longer exists.", 401)
+    return success_response("User fetched successfully.", {"user": serialize_user(user)})

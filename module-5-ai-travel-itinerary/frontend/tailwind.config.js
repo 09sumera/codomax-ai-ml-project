@@ -1,37 +1,27 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  darkMode: 'class',
   content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
+    './index.html',
+    './src/**/*.{js,ts,jsx,tsx}',
   ],
   theme: {
     extend: {
       colors: {
-        brand: {
-          50: '#ecfeff',
-          100: '#cffaff',
-          500: '#06b6d4',
-          600: '#0891b2',
-          700: '#0e7490',
-          900: '#164e63',
-        },
-        slate: {
-          950: '#070a12',
-          900: '#0e1420',
-          850: '#131c2e',
-          800: '#1a2438',
-          700: '#2b3954',
-        }
+        background: '#080a10',
+        surface: '#111621',
+        'surface-alt': '#1a2234',
+        'surface-hover': '#242f47',
+        primary: '#10b981',
+        secondary: '#0ea5e9',
+        accent: '#f59e0b',
+        text: '#f8fafc',
+        muted: '#94a3b8',
+        border: '#1e293b',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace'],
-      },
-      animation: {
-        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-        'spin-slow': 'spin 12s linear infinite',
-      },
+        sans: ['Inter', 'sans-serif'],
+        serif: ['Playfair Display', 'serif'],
+      }
     },
   },
   plugins: [],
